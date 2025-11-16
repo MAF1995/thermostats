@@ -1,4 +1,3 @@
-import math
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -113,19 +112,6 @@ def main():
             power_kw=cfg.power_kw,
             efficiency=cfg.efficiency
         )
-
-        with st.expander("Modèle RC (scientifique)"):
-            col_tau, col_c, col_r = st.columns(3)
-            col_tau.metric("Constante de temps (τ)", f"{cfg.tau_hours():.1f} h")
-            col_c.metric("Capacité thermique (C)", f"{model.heat_capacity():.1f} kWh/K")
-            resistance = model.thermal_resistance()
-            if math.isinf(resistance):
-                r_value = "∞"
-            else:
-                r_value = f"{resistance:.2f} h·K/kWh"
-            col_r.metric("Résistance thermique (R)", r_value)
-            st.latex(r"\frac{dT}{dt} = \frac{T_{ext}-T_{int}}{\tau} + \frac{P \eta}{C}")
-            st.caption("Modèle 1R-1C utilisé pour la simulation numérique de l'habitation.")
 
         T_eff_now = df["temp_ext"].iloc[0] - 0.2 * df["wind"].iloc[0]
 
