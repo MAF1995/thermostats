@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
@@ -5,19 +7,27 @@ import pandas as pd
 class ThermalModel:
     """1R-1C thermal model describing the indoor temperature dynamics."""
 
-    def __init__(self, tau_hours=None, volume_m3=None, power_kw=None, efficiency=None, **legacy_kwargs):
+    def __init__(
+        self,
+        tau_hours=None,
+        volume_m3=None,
+        power_kw=None,
+        efficiency=None,
+        infiltration_factor: float = 1.0,
+        capacitance_kwh: float | None = None,
+        loss_w_per_k: float | None = None,
+        **legacy_kwargs,
+    ):
         """
         Accept both the new ``tau_hours`` keyword and legacy positional/keyword arguments.
 
-        This guards against ``TypeError: unexpected keyword 'tau_hours'`` that occurs when
-        a stale caller still passes ``tau_hours`` to an older constructor signature by
-        explicitly listing the keyword and normalising common aliases such as ``tau``.
+        Additional parameters allow the RC model to integrate infiltration (VMC) and
+        inertial presets coming from the structure selection.
         """
 
         if tau_hours is None:
             tau_hours = legacy_kwargs.pop("tau", None)
 
-        # Allow older code to pass positional arguments without keywords.
         if volume_m3 is None and legacy_kwargs:
             volume_m3 = legacy_kwargs.pop("volume_m3", None) or legacy_kwargs.pop("volume", None)
         if power_kw is None and legacy_kwargs:
@@ -41,8 +51,11 @@ class ThermalModel:
         self.volume = volume_m3
         self.power = power_kw
         self.eff = efficiency
-        # Volumetric heat capacity of air ~0.34 Wh/(m³·K) ≈ 0.00034 kWh/(m³·K)
-        self.C = 0.34 * volume_m3 / 1000  # kWh/K
+        self.infiltration_factor = infiltration_factor
+        # Volumetric heat capacity of air ~0.34 Wh/(m³·K)
+        base_C = 0.34 * volume_m3 / 1000  # kWh/K
+        self.C = capacitance_kwh if capacitance_kwh is not None else base_C
+        self.loss_w_per_k = loss_w_per_k
 
     @property
     def _capacitance_kwh(self):
@@ -66,14 +79,23 @@ class ThermalModel:
         """Return the lumped heat capacity (kWh/K)."""
         return self.C
 
+    def _tau_effective(self):
+        if self.loss_w_per_k:
+            g_kwh_per_hk = self.loss_w_per_k / 1000
+            if self.C == 0 or g_kwh_per_hk == 0:
+                return self.tau
+            return max(0.5, (self.C / g_kwh_per_hk) / self.infiltration_factor)
+        return self.tau / max(self.infiltration_factor, 1e-3)
+
     def heat_step(self, T_int, T_ext_eff, dt_hours):
-        # Forward Euler discretisation of dT/dt = (T_ext - T_int)/tau + P/C
-        dT_env = (T_ext_eff - T_int) * (dt_hours / self.tau)
+        tau_eff = self._tau_effective()
+        dT_env = (T_ext_eff - T_int) * (dt_hours / tau_eff)
         dT_poele = self._heating_rate * dt_hours
         return T_int + dT_env + dT_poele
 
     def cool_step(self, T_int, T_ext_eff, dt_hours):
-        return T_int + (T_ext_eff - T_int) * (dt_hours / self.tau)
+        tau_eff = self._tau_effective()
+        return T_int + (T_ext_eff - T_int) * (dt_hours / tau_eff)
 
     def simulate(self, T_int_start, ext_series, wind_series, hours_on):
         results = []
@@ -113,7 +135,7 @@ class ThermalModel:
 
         dt = -self.tau * np.log(ratio)
         return dt
-    
+
     def time_series_until_target(self, T_int, T_target, T_ext_eff_series):
         temps = []
         T = T_int

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+
 class KPIEngine:
     def __init__(self, price_energy):
         self.price = price_energy
@@ -35,3 +36,12 @@ class KPIEngine:
         y = consumption_series.values
         coeffs = np.polyfit(x, y, 1)
         return coeffs[0]
+
+    def pellet_cost(self, pellet_df: pd.DataFrame):
+        if pellet_df.empty:
+            return 0.0
+        return float(pellet_df["cost_cum"].iloc[-1])
+
+    def stove_electric_cost(self, hours_on: int, standby_watts: float = 60):
+        kwh = (standby_watts / 1000) * hours_on
+        return kwh * self.price
