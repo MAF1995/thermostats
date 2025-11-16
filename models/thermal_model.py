@@ -37,14 +37,25 @@ class ThermalModel:
         return pd.Series(results)
 
     def time_to_reach(self, T_int, T_target, T_ext_eff):
+        if T_target <= T_int:
+            return 0
         num = (T_target - T_int) * self.C
-        den = (self.power * self.eff)
+        den = (self.power * 1000 * self.eff)
         if den <= 0:
             return None
         x = 1 - (num / den)
-        if x >= 1:
-            return 0
-        if x <= 0:
+        if x <= 0 or x >= 1:
             return None
         dt = -self.tau * np.log(x)
         return dt
+    
+    def time_series_until_target(self, T_int, T_target, T_ext_eff_series):
+        temps = []
+        T = T_int
+        for i, T_eff in enumerate(T_ext_eff_series):
+            if T >= T_target:
+                break
+            T = self.heat_step(T, T_eff, 1)
+            temps.append(T)
+        return temps
+

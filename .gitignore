@@ -1,15 +1,67 @@
-*.history
+# --- ENVIRONNEMENT PYTHON ---
+.venv/
+venv/
+env/
+ENV/
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+*.pdb
+
+# --- STREAMLIT ---
+.streamlit/
+
+# --- FICHIERS DE TRAVAIL VS CODE ---
+.vscode/
+.history/
+*.code-workspace
+
+# --- NOTEBOOKS CHECKPOINTS ---
+.ipynb_checkpoints/
+*.nbconvert.*
+
+# --- LOGS ET TEMPORAIRES ---
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+
+# --- DONNÉES GÉNÉRIQUES (évite les gros fichiers dans Git) ---
 data/*.csv
 data/*.sql
-*.zip
-*.7z
-*.tar
-*.gz
-*.sqlite
-*.db
-*.parquet
-*.feather
-env/
-.venv/
+data/*.json
+data/*.parquet
+data/*.zip
+data/*.7z
+data/*.gz
+data/*.tar
+data/*.sqlite
+data/*.db
+
+# Autoriser data/__init__.py
+!data/__init__.py
+
+# --- TESTS ---
+coverage/
+.coverage
+.pytest_cache/
+
+# --- PYTHON BUILD ---
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- CACHE ---
 __pycache__/
-.ipynb_checkpoints/
+.cache/
+
+# --- WINDOWS SPECIFIC ---
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# --- MAC SPECIFIC ---
+.DS_Store

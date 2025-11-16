@@ -17,20 +17,29 @@ class Diagnostic:
             return 2
         return 3
 
+    def explanation(self):
+        if self.loss < 80:
+            return "Structure peu sensible aux variations extérieures."
+        if self.loss < 150:
+            return "Maison modérément exposée à la météo et au vent."
+        return "Habitation très sensible aux variations extérieures."
+
+    def wind_impact(self, mean_wind):
+        impact = self.loss * (0.02 * mean_wind)
+        return round(impact, 2)
+
     def recommendation(self):
         cls = self.classify()
-
         if cls == "faible":
-            return "L'inertie thermique est suffisante pour une stabilité correcte. Un ajustement fin des horaires d’allumage du poêle est généralement suffisant."
-        
+            return "Ajuster uniquement les horaires du poêle selon la météo."
         if cls == "moyenne":
-            return "Les pertes thermiques sont modérées. Une surveillance accrue les jours venteux peut améliorer le confort et la consommation."
-        
-        return "Les pertes thermiques sont élevées. L'habitation est sensible aux variations climatiques. Une optimisation du chauffage ou une amélioration de l'isolation peut réduire les coûts."
+            return "Réduire les infiltrations d’air et surveiller les jours venteux."
+        return "L'amélioration de l'isolation ou le renforcement des seuils peut réduire significativement les pertes."
 
     def summary(self):
         return {
             "classe": self.classify(),
             "score": self.severity_score(),
+            "explication": self.explanation(),
             "recommandation": self.recommendation()
         }
