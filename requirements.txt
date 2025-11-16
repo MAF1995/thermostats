@@ -1,10 +1,4 @@
 pandas
 numpy
-python-dotenv
-plotly
-matplotlib
-seaborn
-pyarrow
-openpyxl
-scipy
-meteostat
+streamlit
+requests
