@@ -1,0 +1,37 @@
+import numpy as np
+import pandas as pd
+
+class KPIEngine:
+    def __init__(self, price_energy):
+        self.price = price_energy
+
+    def daily_cost(self, hours_on, power_kw):
+        return hours_on * power_kw * self.price
+
+    def degree_day_ratio(self, df_temp, T_base=18):
+        df = df_temp.copy()
+        df["deg"] = np.maximum(0, T_base - df["temp_ext"])
+        deg_sum = df["deg"].sum()
+        if deg_sum == 0:
+            return None
+        return deg_sum
+
+    def thermal_loss(self, volume_m3, tau_hours):
+        C = 0.34 * volume_m3
+        return C / tau_hours
+
+    def anomaly_index(self, consumption_series):
+        mean = consumption_series.mean()
+        std = consumption_series.std()
+        if std == 0:
+            return 0
+        z = (consumption_series.iloc[-1] - mean) / std
+        return z
+
+    def consumption_trend(self, consumption_series):
+        if len(consumption_series) < 2:
+            return None
+        x = np.arange(len(consumption_series))
+        y = consumption_series.values
+        coeffs = np.polyfit(x, y, 1)
+        return coeffs[0]

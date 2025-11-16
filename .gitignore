@@ -1,0 +1,15 @@
+*.history
+data/*.csv
+data/*.sql
+*.zip
+*.7z
+*.tar
+*.gz
+*.sqlite
+*.db
+*.parquet
+*.feather
+env/
+.venv/
+__pycache__/
+.ipynb_checkpoints/
