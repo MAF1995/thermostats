@@ -8,6 +8,7 @@ from models.thermal_model import ThermalModel
 from core.kpi_engine import KPIEngine
 from core.diagnostic import Diagnostic
 from data.data_france import FranceMeteo
+import plotly.graph_objects as go
 
 
 def sidebar_inputs():
@@ -91,15 +92,56 @@ def main():
     with tab1:
         st.subheader("Prévisions météo")
         st.write("Données météo horaires fournies par Météo-France (modèle Open-Meteo).")
-        
+
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Température actuelle (°C)", df["temp_ext"].iloc[0])
+            st.metric("Température extérieure (°C)", df["temp_ext"].iloc[0])
         with col2:
             st.metric("Vent (km/h)", df["wind"].iloc[0])
 
         st.divider()
-        st.line_chart(df[["temp_ext", "wind"]])
+
+        horizon = 24
+        hours_axis = df["time"].dt.strftime("%H:%M").head(horizon)
+
+        indoor_projection = proj.reindex(range(horizon)).astype(float)
+        indoor_projection.iloc[14:] = float("nan")
+
+        pellet_energy_kwh_per_kg = 4.8
+        pellet_bags_per_hour = 0.0
+        if cfg.efficiency > 0:
+            pellet_bags_per_hour = (cfg.power_kw / (pellet_energy_kwh_per_kg * cfg.efficiency)) / 15
+        pellet_curve = [pellet_bags_per_hour if i < hours_on else 0 for i in range(horizon)]
+
+        meteo_plot = pd.DataFrame(
+            {
+                "Heure (24h)": hours_axis,
+                "Température extérieure (°C)": df["temp_ext"].head(horizon).values,
+                "Vent (km/h)": df["wind"].head(horizon).values,
+                "Température intérieure projetée (°C)": indoor_projection.values,
+                "Consommation pellet (sac de 15 kg / h)": pellet_curve,
+            }
+        )
+
+        meteo_long = meteo_plot.melt(
+            id_vars="Heure (24h)", var_name="Mesure", value_name="Valeur"
+        )
+
+        fig_meteo = px.line(
+            meteo_long,
+            x="Heure (24h)",
+            y="Valeur",
+            color="Mesure",
+            markers=True,
+            title="Prévisions sur 24h (température, vent, pellet et intérieur)"
+        )
+        fig_meteo.update_layout(
+            xaxis_title="Heure (format 24h)",
+            yaxis_title="Valeur (unités mixtes)",
+            legend_title="Courbe",
+        )
+
+        st.plotly_chart(fig_meteo, use_container_width=True)
 
     with tab2:
         st.write("Simulation thermique basée sur l'inertie de l'habitation et la météo horaire.")
@@ -137,16 +179,48 @@ def main():
         if dt is None:
             st.warning("Impossible d'atteindre la température cible avec les paramètres actuels.")
         else:
-            fire_time = time_now + pd.Timedelta(hours=dt)
+            fire_time = time_now
+            target_eta = time_now + pd.Timedelta(hours=dt)
             st.metric("Temps nécessaire pour atteindre la température cible (h)", round(dt, 2))
             st.markdown(
                 f"""
                 <div style="padding: 14px; border-radius: 6px; background-color: #0275d8; color: white; font-weight: bold;">
-                    Allumer le poêle à : {fire_time.strftime('%H:%M')}
+                    Allumer le poêle à : {fire_time.strftime('%H:%M')} — ETA {target_eta.strftime('%H:%M')}
                 </div>
-                """, 
+                """,
                 unsafe_allow_html=True
             )
+
+            timeline = pd.DataFrame(
+                [
+                    {
+                        "Phase": "Allumage",
+                        "Début": time_now,
+                        "Fin": time_now + pd.Timedelta(minutes=5),
+                    },
+                    {
+                        "Phase": "Montée jusqu'à consigne",
+                        "Début": time_now + pd.Timedelta(minutes=5),
+                        "Fin": target_eta,
+                    },
+                    {
+                        "Phase": "Maintien estimé",
+                        "Début": target_eta,
+                        "Fin": target_eta + pd.Timedelta(hours=max(1, hours_on - dt)),
+                    },
+                ]
+            )
+            fig_eta = px.timeline(
+                timeline,
+                x_start="Début",
+                x_end="Fin",
+                y="Phase",
+                color="Phase"
+            )
+            fig_eta.update_layout(
+                xaxis_title="Horloge (24h)", yaxis_title="Étapes", showlegend=False
+            )
+            st.plotly_chart(fig_eta, use_container_width=True)
 
         st.write("")
         st.subheader("Alerte d’allumage")
@@ -215,6 +289,13 @@ def main():
             unsafe_allow_html=True
         )
 
+        with st.expander("Légendes (définitions)"):
+            st.markdown(
+                "- **Coût journalier estimé** : consommation horaire du poêle multipliée par le prix de l'énergie.\n"
+                "- **Degré-jours** : indicateur d'écart moyen entre la température intérieure de consigne et la température extérieure.\n"
+                "- **Déperdition thermique** : puissance perdue par degré d'écart (W/K), reflet de l'isolation et des fuites."
+            )
+
 
     with tab4:
         st.write("Évaluation du comportement thermique de l'habitation selon les pertes estimées.")
@@ -258,6 +339,15 @@ def main():
         st.subheader("Recommandation")
         st.write(rec)
 
+        with st.expander("Détails du diagnostic"):
+            st.markdown(
+                "- **Isolation saisie** : {isolation}\n"
+                "- **Pertes estimées** : {loss:.1f} W/K — plus la valeur est élevée, plus la maison se refroidit vite.\n"
+                "- **Inertie thermique** : {inertia} (impacte la vitesse de montée et de descente en température).\n"
+                "- **Conseil** : surveiller les infiltrations d'air, les vitrages et l'isolation des combles pour améliorer le score."
+                .format(isolation=cfg.isolation, loss=loss, inertia=cfg.inertia_level)
+            )
+
 
     with tab5:
         st.write("Carte interactive des températures en France.")
@@ -268,24 +358,59 @@ def main():
         fm = FranceMeteo()
         df_fr = fm.fetch()
 
-        fig = px.scatter_mapbox(
-            df_fr,
-            lat="lat",
-            lon="lon",
-            color="temp",
-            size=[10] * len(df_fr),
-            hover_name="city",
-            hover_data={"temp": True, "wind": True},
-            color_continuous_scale="RdBu_r",
-            zoom=4,
-            height=600
+        layer_options = {
+            "Température extérieure": ("temp", "RdBu_r", "°C"),
+            "Humidité relative": ("humidity", "Blues", "%"),
+            "Vent": ("wind", "PuBu", "km/h"),
+            "Température ressentie": ("apparent", "OrRd", "°C"),
+        }
+
+        selected_layers = st.multiselect(
+            "Couches à afficher (gradients)", list(layer_options.keys()), default=["Température extérieure"]
         )
+
+        if not selected_layers:
+            selected_layers = ["Température extérieure"]
+
+        fig = go.Figure()
+
+        for layer in selected_layers:
+            col, scale, unit = layer_options[layer]
+            fig.add_trace(
+                go.Scattermapbox(
+                    lat=df_fr["lat"],
+                    lon=df_fr["lon"],
+                    mode="markers",
+                    marker=dict(
+                        size=12,
+                        color=df_fr[col],
+                        colorscale=scale,
+                        showscale=True,
+                        colorbar=dict(title=f"{layer} ({unit})"),
+                        opacity=0.8,
+                    ),
+                    hovertemplate=(
+                        "<b>%{customdata[0]}</b><br>"
+                        f"{layer}: %{{marker.color:.1f}} {unit}<br>"
+                        "Vent: %{customdata[1]} km/h<br>"
+                        "Humidité: %{customdata[2]}%<br>"
+                        "Conseil: %{customdata[3]}<extra></extra>"
+                    ),
+                    customdata=df_fr[["city", "wind", "humidity", "start_hint"]].values,
+                    name=layer,
+                )
+            )
 
         fig.update_layout(
             mapbox_style="carto-positron",
-            margin={"r": 0, "t": 0, "l": 0, "b": 0}
+            mapbox_zoom=4,
+            mapbox_center={"lat": 46.5, "lon": 2.5},
+            margin={"r": 0, "t": 0, "l": 0, "b": 0},
+            height=650,
+            legend_title="Calques actifs",
         )
 
+        st.caption("Pastilles redimensionnées selon l'échelle de carte et colorées par couches météorologiques sélectionnées.")
         st.plotly_chart(fig, use_container_width=True)
 
 st.markdown(

@@ -24,13 +24,21 @@ class FranceMeteo:
             params = {
                 "latitude": lat,
                 "longitude": lon,
-                "current": "temperature_2m,windspeed_10m",
+                "current": "temperature_2m,relativehumidity_2m,windspeed_10m,apparent_temperature",
                 "timezone": "Europe/Paris"
             }
             r = requests.get(self.base_url, params=params).json()
-            temp = r["current"]["temperature_2m"]
-            wind = r["current"]["windspeed_10m"]
-            data.append([city, lat, lon, temp, wind])
+            temp = r["current"].get("temperature_2m")
+            wind = r["current"].get("windspeed_10m")
+            humidity = r["current"].get("relativehumidity_2m")
+            apparent = r["current"].get("apparent_temperature")
+            data.append([city, lat, lon, temp, wind, humidity, apparent])
 
-        df = pd.DataFrame(data, columns=["city", "lat", "lon", "temp", "wind"])
+        df = pd.DataFrame(
+            data,
+            columns=["city", "lat", "lon", "temp", "wind", "humidity", "apparent"],
+        )
+        df["start_hint"] = df["temp"].apply(
+            lambda t: "Allumage immédiat conseillé" if t is not None and t < 5 else "Surveiller la baisse nocturne"
+        )
         return df
