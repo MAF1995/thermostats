@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "thermostats"
+version = "0.1.0"
+description = "Simulation thermique et tableau de bord Streamlit pour l'anticipation d'allumage de poêle."
+authors = [
+    { name = "Marc-Alfred FALIGANT" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+    "streamlit",
+    "pandas",
+    "numpy",
+    "plotly",
+    "requests",
+    "pytest"
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent"
+]
+
+
+[project.urls]
+Homepage = "https://github.com/MAF1995/thermostats"
+
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "models*", "data*", "utils*"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+skip-string-normalization = true
