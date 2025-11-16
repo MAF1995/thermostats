@@ -32,6 +32,20 @@ def apply_timeline_styling_day_night(fig: go.Figure, hours: list[str]):
                 layer="below",
             )
         )
+    current_hour = pd.Timestamp.now().hour
+    current_label = hours[min(current_hour, len(hours) - 1)]
+    shapes.append(
+        dict(
+            type="line",
+            xref="x",
+            yref="paper",
+            x0=current_label,
+            x1=current_label,
+            y0=0,
+            y1=1,
+            line=dict(color="#2c3e50", width=2, dash="dot"),
+        )
+    )
     fig.update_layout(shapes=shapes)
     return fig
 
@@ -135,13 +149,16 @@ def render_weather_tab(df, indoor_proj, pellet_df, hours_on):
     indoor_projection = indoor_proj.reindex(range(horizon)).astype(float)
     indoor_projection.iloc[14:] = float("nan")
 
+    pellet_curve = pellet_df["bags_used"].reindex(range(horizon)).fillna(0)
+    pellet_curve = pellet_curve.where(~pellet_df["recharge"].reindex(range(horizon)).fillna(False))
+
     meteo_plot = pd.DataFrame(
         {
             "Heure (24h)": hours_axis,
             "Température extérieure (°C)": df["temp_ext"].head(horizon).values,
             "Température intérieure projetée (°C)": indoor_projection.values,
             "Vent (km/h)": df["wind"].head(horizon).values,
-            "Consommation pellet (sac/h)": pellet_df["bags_used"].reindex(range(horizon)).fillna(0).values,
+            "Consommation pellet (sac/h)": pellet_curve.values,
         }
     )
     meteo_long = meteo_plot.melt(id_vars="Heure (24h)", var_name="Mesure", value_name="Valeur")
@@ -159,6 +176,19 @@ def render_weather_tab(df, indoor_proj, pellet_df, hours_on):
         yaxis_title="Valeur (unités mixtes)",
         legend_title="Courbe",
     )
+    recharge_hours = [hours_axis.iloc[i] for i in pellet_df.index[pellet_df["recharge"]]]
+    if recharge_hours:
+        fig_meteo.add_trace(
+            go.Scatter(
+                x=recharge_hours,
+                y=[pellet_curve.max()] * len(recharge_hours),
+                mode="markers",
+                marker_symbol="triangle-up",
+                marker_color="#e67e22",
+                name="Point de recharge",
+                showlegend=True,
+            )
+        )
     st.plotly_chart(fig_meteo, use_container_width=True)
 
 
@@ -194,6 +224,21 @@ def render_thermal_tab(cfg, df, model, indoor_proj, pellet_df, hours_on):
                              name="Vent (km/h)", mode="lines", yaxis="y2"))
     fig.add_trace(go.Bar(x=timeline_df["Heure"], y=timeline_df["Pellets sac/h"],
                          name="Pellets (sac/h)", yaxis="y3", marker_color="#e67e22", opacity=0.6))
+    recharge_hours = [hours_axis[i] for i in pellet_df.index[pellet_df["recharge"]]]
+    if recharge_hours:
+        fig.add_trace(
+            go.Scatter(
+                x=recharge_hours,
+                y=[timeline_df["Pellets sac/h"].max() * 1.05] * len(recharge_hours),
+                mode="markers+text",
+                text=["Recharge"] * len(recharge_hours),
+                textposition="top center",
+                marker_symbol="triangle-up",
+                marker_color="#e67e22",
+                name="Points de recharge",
+                yaxis="y3",
+            )
+        )
 
     fig.update_layout(
         xaxis=dict(domain=[0, 0.9]),
@@ -325,10 +370,15 @@ def render_map_tab(cfg, map_engine: MapEngine):
 
     st.subheader("Carte thermique de la France")
     fm = FranceMeteo()
-    df_fr = fm.fetch()
 
     zoom = st.slider("Zoom carte", min_value=3.0, max_value=8.0, value=4.5, step=0.5)
-    communes = map_engine.filter_by_zoom(map_engine.load_communes(), zoom)
+    communes_all = map_engine.load_communes()
+    communes = map_engine.filter_by_zoom(communes_all, zoom)
+    communes = communes.rename(columns={"nom": "city"}) if "nom" in communes.columns else communes
+
+    weather = fm.fetch(communes)
+    df_fr = weather["data"]
+    timeline = list(weather["timeline"].strftime("%d/%m %Hh"))
 
     layer_options = {
         "Température": ("temp", "RdBu_r", "°C"),
@@ -345,12 +395,17 @@ def render_map_tab(cfg, map_engine: MapEngine):
 
     base_fig = map_engine.base_figure(center_lat=cfg.latitude, center_lon=cfg.longitude, zoom=zoom)
 
+    size_hint = df_fr["pop"].fillna(0).apply(lambda p: max(6, min(18, (p + 1) ** 0.25))) if "pop" in df_fr else None
+
     for layer in selected_layers:
         col, scale, unit = layer_options[layer]
-        base_fig.add_trace(map_engine.build_layer(df_fr, layer, df_fr[col], scale, unit))
+        base_fig.add_trace(map_engine.build_layer(df_fr, layer, df_fr[f"{col}_0"], scale, unit, sizes=size_hint))
 
-    timeline = pd.date_range(pd.Timestamp.now(), periods=6, freq="3H").tolist()
-    frames = map_engine.calc_timelapse_frames(df_fr, timeline, {name: {"scale": layer_options[name][1], "unit": layer_options[name][2]} for name in selected_layers})
+    frames = map_engine.calc_timelapse_frames(
+        df_fr,
+        timeline,
+        {name: {"scale": layer_options[name][1], "unit": layer_options[name][2]} for name in selected_layers},
+    )
     base_fig.frames = frames
     map_engine.add_timelapse_controls(base_fig)
     map_engine.pick_on_map(base_fig, cfg.latitude, cfg.longitude)

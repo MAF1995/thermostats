@@ -1,7 +1,7 @@
 import json
 import io
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -56,13 +56,27 @@ class MapEngine:
             return df[df["pop"] > 10000]
         return df
 
-    def build_layer(self, df: pd.DataFrame, layer: str, values: pd.Series, colorscale: str, unit: str):
+    def build_layer(
+        self,
+        df: pd.DataFrame,
+        layer: str,
+        values: pd.Series,
+        colorscale: str,
+        unit: str,
+        sizes: Sequence | None = None,
+    ):
         return go.Scattermapbox(
             lat=df["lat"],
             lon=df["lon"],
             mode="markers",
-            marker=dict(size=9, color=values, colorscale=colorscale, showscale=True, opacity=0.75,
-                        colorbar=dict(title=f"{layer} ({unit})")),
+            marker=dict(
+                size=sizes if sizes is not None else 9,
+                color=values,
+                colorscale=colorscale,
+                showscale=True,
+                opacity=0.75,
+                colorbar=dict(title=f"{layer} ({unit})"),
+            ),
             hovertemplate=("<b>%{customdata[0]}</b><br>" f"{layer}: %{{marker.color:.1f}} {unit}<extra></extra>"),
             customdata=df[["city"]].values,
             name=layer,
@@ -110,8 +124,12 @@ class MapEngine:
             sliders=[
                 {
                     "steps": [
-                        {"args": [[f"{i}",], {"frame": {"duration": 0, "redraw": True}}], "label": str(i), "method": "animate"}
-                        for i in range(len(fig.frames) if fig.frames else 0)
+                        {
+                            "args": [[frame.name], {"frame": {"duration": 0, "redraw": True}}],
+                            "label": frame.name,
+                            "method": "animate",
+                        }
+                        for frame in (fig.frames or [])
                     ]
                 }
             ],
