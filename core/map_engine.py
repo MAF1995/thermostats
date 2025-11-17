@@ -82,12 +82,16 @@ class MapEngine:
             name=layer,
         )
 
-    def calc_timelapse_frames(self, base_df: pd.DataFrame, timeline: List[pd.Timestamp], layers: Dict[str, Dict]):
+    def calc_timelapse_frames(
+        self, base_df: pd.DataFrame, timeline: List[pd.Timestamp], layers: Dict[str, Dict]
+    ):
         frames = []
         for i, ts in enumerate(timeline):
             traces = []
             for name, meta in layers.items():
-                values = base_df[f"{name}_{i}"] if f"{name}_{i}" in base_df else base_df[name]
+                col = meta.get("col", name)
+                col_name = f"{col}_{i}"
+                values = base_df[col_name] if col_name in base_df else base_df[col]
                 traces.append(self.build_layer(base_df, name, values, meta["scale"], meta["unit"]))
             frames.append(go.Frame(data=traces, name=str(ts)))
         return frames

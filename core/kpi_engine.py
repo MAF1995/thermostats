@@ -6,8 +6,10 @@ class KPIEngine:
     def __init__(self, price_energy):
         self.price = price_energy
 
-    def daily_cost(self, hours_on, power_kw):
-        return hours_on * power_kw * self.price
+    def daily_cost(self, pellet_df: pd.DataFrame, hours_on: int, standby_watts: float = 60):
+        pellet_cost = 0.0 if pellet_df.empty else float(pellet_df["cost_cum"].iloc[-1])
+        electric_cost = self.stove_electric_cost(hours_on, standby_watts=standby_watts)
+        return pellet_cost + electric_cost
 
     def degree_day_ratio(self, df_temp, T_base=18):
         df = df_temp.copy()
@@ -15,7 +17,7 @@ class KPIEngine:
         deg_sum = df["deg"].sum()
         if deg_sum == 0:
             return None
-        return deg_sum
+        return deg_sum / 24  # exprimé en degrés-jours
 
     def thermal_loss(self, volume_m3, tau_hours):
         C = 0.34 * volume_m3
