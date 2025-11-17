@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 
 PELLET_ENERGY_KWH_PER_KG = 4.6
@@ -12,20 +14,44 @@ class PelletEngine:
         self.efficiency = efficiency
         self.pellet_price_bag = pellet_price_bag
 
-    def hourly_bag_rate(self, target_temp: float) -> float:
+    def hourly_bag_rate(
+        self,
+        target_temp: float,
+        hours_on: int,
+        desired_duration_hours: float | None = None,
+    ) -> float:
+        bounds = self.bag_duration_bounds()
         surcharge = max(0, target_temp - 20) * 0.07
         base_rate_kg_h = (self.power_kw / (PELLET_ENERGY_KWH_PER_KG * max(self.efficiency, 1e-6)))
         kg_with_temp = base_rate_kg_h * (1 + surcharge)
-        rate = kg_with_temp / KG_PER_BAG
-        # Encadre la vitesse pour rester entre 14h et 22h par sac
-        rate = min(max(rate, 1 / self.bag_duration_bounds()["max_hours"]), 1 / self.bag_duration_bounds()["min_hours"])
+
+        heating_hours = max(1, hours_on)
+        heat_factor = 1 + (max(0, 6 - heating_hours) * 0.05) - (max(0, heating_hours - 10) * 0.02)
+        heat_factor = max(0.75, min(1.25, heat_factor))
+
+        target_duration = desired_duration_hours or bounds["nominal_hours"]
+        duration_factor = bounds["nominal_hours"] / max(1.0, target_duration)
+        min_factor = bounds["min_hours"] / bounds["max_hours"]
+        max_factor = bounds["max_hours"] / bounds["min_hours"]
+        duration_factor = max(min_factor, min(max_factor, duration_factor))
+
+        kg_adjusted = kg_with_temp * heat_factor * duration_factor
+        rate = kg_adjusted / KG_PER_BAG
+        rate = min(max(rate, 1 / bounds["max_hours"]), 1 / bounds["min_hours"])
         return rate
 
-    def compute_pellet_usage(self, hours: int, target_temp: float, active_mask=None) -> pd.DataFrame:
+    def compute_pellet_usage(
+        self,
+        hours: int,
+        target_temp: float,
+        hours_on: int,
+        desired_duration_hours: float,
+        active_mask=None,
+    ) -> pd.DataFrame:
         if active_mask is None:
             active_mask = [True] * hours
 
-        rate_bag_h = self.hourly_bag_rate(target_temp)
+        rate_bag_h = self.hourly_bag_rate(target_temp, hours_on, desired_duration_hours)
         data = []
         bags_consumed = 0.0
         segment = 0
@@ -53,5 +79,5 @@ class PelletEngine:
         return df
 
     def bag_duration_bounds(self):
-        return {"min_hours": 14, "max_hours": 22}
+        return {"min_hours": 14, "max_hours": 22, "nominal_hours": 18}
 

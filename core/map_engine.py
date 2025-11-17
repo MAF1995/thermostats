@@ -178,10 +178,14 @@ class MapEngine:
         unit: str,
         sizes: Sequence | None = None,
         label_fields: Sequence[str] | None = None,
+        show_scale: bool = True,
     ):
         if label_fields is None:
             label_fields = ["city"] if "city" in df.columns else list(df.columns[:1])
         custom = df[label_fields].values
+        colorbar = None
+        if show_scale:
+            colorbar = dict(title=f"{layer} ({unit})", x=-0.07, len=0.4)
         return go.Scattermapbox(
             lat=df["lat"],
             lon=df["lon"],
@@ -190,9 +194,9 @@ class MapEngine:
                 size=sizes if sizes is not None else 9,
                 color=values,
                 colorscale=colorscale,
-                showscale=True,
+                showscale=show_scale,
                 opacity=0.75,
-                colorbar=dict(title=f"{layer} ({unit})"),
+                colorbar=colorbar,
             ),
             hovertemplate=("<b>%{customdata[0]}</b><br>" f"{layer}: %{{marker.color:.1f}} {unit}<extra></extra>"),
             customdata=custom,

@@ -11,7 +11,7 @@ class MeteoClient:
         params = {
             "latitude": self.lat,
             "longitude": self.lon,
-            "hourly": "temperature_2m,windspeed_10m",
+            "hourly": "temperature_2m,windspeed_10m,relativehumidity_2m,shortwave_radiation",
             "timezone": "Europe/Paris"
         }
 
@@ -21,7 +21,9 @@ class MeteoClient:
         df = pd.DataFrame({
             "time": data["hourly"]["time"],
             "temp_ext": data["hourly"]["temperature_2m"],
-            "wind": data["hourly"]["windspeed_10m"]
+            "wind": data["hourly"]["windspeed_10m"],
+            "humidity": data["hourly"].get("relativehumidity_2m"),
+            "solar_radiation": data["hourly"].get("shortwave_radiation"),
         })
 
         df["time"] = pd.to_datetime(df["time"])

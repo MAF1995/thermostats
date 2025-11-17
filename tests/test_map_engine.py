@@ -15,7 +15,7 @@ def test_calc_timelapse_frames_handles_named_layers():
         "region": ["R1"],
         "department": ["D1"],
     })
-    timeline = ["t0", "t1"]
+    timeline = pd.to_datetime(["2020-01-01", "2020-01-02"]).to_list()
     layers = {
         "Température": {"scale": "RdBu_r", "unit": "°C", "col": "temp"},
         "Vent": {"scale": "PuBu", "unit": "km/h", "col": "wind"},

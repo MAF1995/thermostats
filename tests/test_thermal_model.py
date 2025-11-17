@@ -21,3 +21,15 @@ def test_time_to_reach_impossible():
     model = ThermalModel(tau_hours=5, volume_m3=200, power_kw=0, efficiency=0.85)
     dt = model.time_to_reach(17, 20, 5)
     assert dt is None
+
+
+def test_simulation_caps_at_target_and_cools():
+    model = ThermalModel(tau_hours=4, volume_m3=150, power_kw=6, efficiency=0.85)
+    ext = np.full(24, 5.0)
+    wind = np.zeros(24)
+    hours_on = 3
+    target = 20
+    series = model.simulate(17, ext, wind, hours_on=hours_on, target_temp=target)
+    assert np.all(series <= 20 + 1e-6)
+    assert series.iloc[hours_on - 1] <= target
+    assert series.iloc[hours_on] < series.iloc[hours_on - 1]

@@ -53,7 +53,9 @@ class ThermalModel:
         self.eff = efficiency
         self.infiltration_factor = infiltration_factor
         # Volumetric heat capacity of air ~0.34 Wh/(m³·K)
-        base_C = 0.34 * volume_m3 / 1000  # kWh/K
+        # volume_m3 is validated above; assert to help type checkers that it's not None
+        assert volume_m3 is not None
+        base_C = 0.34 * float(volume_m3) / 1000  # kWh/K
         self.C = capacitance_kwh if capacitance_kwh is not None else base_C
         self.loss_w_per_k = loss_w_per_k
 
@@ -67,7 +69,10 @@ class ThermalModel:
         """Equivalent temperature gain per hour from the stove (K/h)."""
         if self._capacitance_kwh == 0:
             return 0.0
-        return (self.power * self.eff) / self._capacitance_kwh
+        # ensure power and efficiency are numeric (fallback to 0.0 if None)
+        power = 0.0 if self.power is None else float(self.power)
+        eff = 0.0 if self.eff is None else float(self.eff)
+        return (power * eff) / self._capacitance_kwh
 
     def thermal_resistance(self):
         """Return the lumped thermal resistance (h·K/kWh)."""
@@ -97,7 +102,16 @@ class ThermalModel:
         tau_eff = self._tau_effective()
         return T_int + (T_ext_eff - T_int) * (dt_hours / tau_eff)
 
-    def simulate(self, T_int_start, ext_series, wind_series, hours_on):
+    def simulate(
+        self,
+        T_int_start,
+        ext_series,
+        wind_series,
+        hours_on,
+        humidity_series=None,
+        target_temp=None,
+        buffer=0.5,
+    ):
         results = []
         T_int = T_int_start
 
@@ -105,15 +119,40 @@ class ThermalModel:
             T_ext = ext_series[i]
             wind = wind_series[i]
             T_eff = T_ext - 0.2 * wind
+            humidity = None
+            if humidity_series is not None and i < len(humidity_series):
+                humidity = humidity_series[i]
 
-            if i < hours_on:
+            stove_on = i < hours_on
+            if target_temp is not None and T_int >= target_temp + buffer:
+                stove_on = False
+
+            if stove_on:
                 T_int = self.heat_step(T_int, T_eff, 1)
+                if target_temp is not None:
+                    T_int = min(T_int, target_temp)
             else:
                 T_int = self.cool_step(T_int, T_eff, 1)
+                extra_loss = self._extra_cooling(T_int, T_ext, wind, humidity)
+                T_int -= extra_loss
+                if target_temp is not None:
+                    T_int = min(T_int, target_temp)
 
             results.append(T_int)
 
         return pd.Series(results)
+
+    def _extra_cooling(self, T_int, T_ext, wind, humidity):
+        delta = max(0.0, T_int - T_ext)
+        if delta == 0:
+            return 0.0
+        wind_term = min(1.2, wind / 40.0)
+        humidity_term = 0.0
+        if humidity is not None:
+            humidity_term = max(0.0, (humidity - 60.0) / 40.0)
+        structure_term = max(0.5, min(1.8, self.infiltration_factor))
+        modifier = 1 + 0.6 * wind_term + 0.4 * humidity_term
+        return delta * 0.015 * modifier * structure_term
 
     def time_to_reach(self, T_int, T_target, T_ext_eff):
         if T_target <= T_int:
