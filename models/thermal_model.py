@@ -92,11 +92,16 @@ class ThermalModel:
             return max(0.5, (self.C / g_kwh_per_hk) / self.infiltration_factor)
         return self.tau / max(self.infiltration_factor, 1e-3)
 
-    def heat_step(self, T_int, T_ext_eff, dt_hours):
+    def heat_step(self, T_int, T_ext_eff, dt_hours, max_delta_per_hour: float | None = None):
         tau_eff = self._tau_effective()
         dT_env = (T_ext_eff - T_int) * (dt_hours / tau_eff)
         dT_poele = self._heating_rate * dt_hours
-        return T_int + dT_env + dT_poele
+        delta = dT_env + dT_poele
+        if max_delta_per_hour is not None and max_delta_per_hour > 0:
+            cap = max_delta_per_hour * dt_hours
+            if delta > cap:
+                delta = cap
+        return T_int + delta
 
     def cool_step(self, T_int, T_ext_eff, dt_hours):
         tau_eff = self._tau_effective()
@@ -113,6 +118,7 @@ class ThermalModel:
         buffer=0.5,
         return_details: bool = False,
         custom_mask=None,
+        max_delta_per_hour: float | None = None,
     ):
         results = []
         stove_mask = []
@@ -135,7 +141,7 @@ class ThermalModel:
             stove_mask.append(bool(stove_on))
 
             if stove_on:
-                T_int = self.heat_step(T_int, T_eff, 1)
+                T_int = self.heat_step(T_int, T_eff, 1, max_delta_per_hour=max_delta_per_hour)
                 if target_temp is not None:
                     T_int = min(T_int, target_temp)
             else:
@@ -164,10 +170,12 @@ class ThermalModel:
         modifier = 1 + 0.6 * wind_term + 0.4 * humidity_term
         return delta * 0.015 * modifier * structure_term
 
-    def time_to_reach(self, T_int, T_target, T_ext_eff):
+    def time_to_reach(self, T_int, T_target, T_ext_eff, max_delta_per_hour: float | None = None):
         if T_target <= T_int:
             return 0
         heating_rate = self._heating_rate
+        if max_delta_per_hour is not None and max_delta_per_hour > 0:
+            heating_rate = min(heating_rate, max_delta_per_hour)
         if heating_rate <= 0:
             return None
 
@@ -185,13 +193,19 @@ class ThermalModel:
         dt = -self.tau * np.log(ratio)
         return dt
 
-    def time_series_until_target(self, T_int, T_target, T_ext_eff_series):
+    def time_series_until_target(
+        self,
+        T_int,
+        T_target,
+        T_ext_eff_series,
+        max_delta_per_hour: float | None = None,
+    ):
         temps = []
         T = T_int
         for i, T_eff in enumerate(T_ext_eff_series):
             if T >= T_target:
                 break
-            T = self.heat_step(T, T_eff, 1)
+            T = self.heat_step(T, T_eff, 1, max_delta_per_hour=max_delta_per_hour)
             temps.append(T)
         return temps
 
