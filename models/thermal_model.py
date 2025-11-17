@@ -111,8 +111,11 @@ class ThermalModel:
         humidity_series=None,
         target_temp=None,
         buffer=0.5,
+        return_details: bool = False,
+        custom_mask=None,
     ):
         results = []
+        stove_mask = []
         T_int = T_int_start
 
         for i in range(len(ext_series)):
@@ -123,9 +126,13 @@ class ThermalModel:
             if humidity_series is not None and i < len(humidity_series):
                 humidity = humidity_series[i]
 
-            stove_on = i < hours_on
+            if custom_mask is not None:
+                stove_on = bool(custom_mask[i]) if i < len(custom_mask) else False
+            else:
+                stove_on = i < hours_on
             if target_temp is not None and T_int >= target_temp + buffer:
                 stove_on = False
+            stove_mask.append(bool(stove_on))
 
             if stove_on:
                 T_int = self.heat_step(T_int, T_eff, 1)
@@ -140,7 +147,10 @@ class ThermalModel:
 
             results.append(T_int)
 
-        return pd.Series(results)
+        temps = pd.Series(results)
+        if return_details:
+            return pd.DataFrame({"temp": temps, "stove_on": stove_mask})
+        return temps
 
     def _extra_cooling(self, T_int, T_ext, wind, humidity):
         delta = max(0.0, T_int - T_ext)

@@ -27,47 +27,76 @@ class FranceMeteo:
         d2 = diff_lat**2 + diff_lon**2
         return np.argmin(d2, axis=1)
 
-    def fetch_anchor_weather(self, anchors: pd.DataFrame, frames: int = 8) -> dict:
+    def fetch_anchor_weather(self, anchors: pd.DataFrame, frames: int = 24) -> dict:
         """Télécharge un échantillon météo sur quelques grandes villes (ancres) pour alimenter la carte.
 
-        On récupère un horizon de 24h (8 pas de 3h) puis on projette sur toutes les communes.
+        On récupère un horizon de 24h à résolution horaire, puis on projette sur toutes les communes.
         """
 
-        temps, winds, hums, apparents = [], [], [], []
+        temps, winds, hums, apparents, radiations = [], [], [], [], []
         timeline = None
         for _, row in anchors.iterrows():
             params = {
                 "latitude": row["lat"],
                 "longitude": row["lon"],
-                "hourly": "temperature_2m,relativehumidity_2m,windspeed_10m,apparent_temperature",
+                "hourly": "temperature_2m,relativehumidity_2m,windspeed_10m,apparent_temperature,shortwave_radiation",
                 "timezone": "Europe/Paris",
             }
             try:
                 resp = requests.get(self.base_url, params=params, timeout=20)
                 data = resp.json().get("hourly", {})
                 if timeline is None:
-                    timeline = pd.to_datetime(data.get("time", [])[:frames * 3:3])
-                temps.append(np.array(data.get("temperature_2m", [])[: frames * 3:3]))
-                winds.append(np.array(data.get("windspeed_10m", [])[: frames * 3:3]))
-                hums.append(np.array(data.get("relativehumidity_2m", [])[: frames * 3:3]))
-                apparents.append(np.array(data.get("apparent_temperature", [])[: frames * 3:3]))
+                    timeline = pd.to_datetime(data.get("time", [])[:frames])
+                temps.append(np.array(data.get("temperature_2m", [])[:frames]))
+                winds.append(np.array(data.get("windspeed_10m", [])[:frames]))
+                hums.append(np.array(data.get("relativehumidity_2m", [])[:frames]))
+                apparents.append(np.array(data.get("apparent_temperature", [])[:frames]))
+                radiations.append(np.array(data.get("shortwave_radiation", [])[:frames]))
             except Exception:
                 # Fallback doux si l'API est indisponible
                 if timeline is None:
-                    timeline = pd.date_range(pd.Timestamp.now(), periods=frames, freq="3H")
+                    timeline = pd.date_range(pd.Timestamp.now(), periods=frames, freq="H")
                 base = np.linspace(2, 12, frames)
                 temps.append(base)
                 winds.append(np.linspace(5, 25, frames))
                 hums.append(np.linspace(60, 90, frames))
                 apparents.append(base - 1.5)
+                radiations.append(np.linspace(50, 500, frames))
+
+        if timeline is None:
+            timeline = pd.date_range(pd.Timestamp.now(), periods=frames, freq="H")
+
+        temps = np.array(temps, dtype=float)
+        winds = np.array(winds, dtype=float)
+        hums = np.array(hums, dtype=float)
+        apparents = np.array(apparents, dtype=float)
+        radiations = np.array(radiations, dtype=float)
+
+        # Remplit les valeurs manquantes par la médiane des ancres disponibles
+        def _fill_nan(arr):
+            if arr.size == 0:
+                return arr
+            mask = np.isnan(arr)
+            if mask.any():
+                med = np.nanmedian(arr, axis=0)
+                idx = np.where(mask)
+                arr[idx] = med[idx[1]]
+            return arr
+
+        temps = _fill_nan(temps)
+        winds = _fill_nan(winds)
+        hums = _fill_nan(hums)
+        apparents = _fill_nan(apparents)
+        radiations = _fill_nan(radiations)
 
         return {
-            "timeline": timeline if timeline is not None else pd.date_range(pd.Timestamp.now(), periods=frames, freq="3H"),
-            "temps": np.array(temps),
-            "winds": np.array(winds),
-            "hums": np.array(hums),
-            "apparents": np.array(apparents),
+            "timeline": timeline,
+            "temps": temps,
+            "winds": winds,
+            "hums": hums,
+            "apparents": apparents,
             "anchors": anchors.reset_index(drop=True),
+            "radiations": radiations,
         }
 
     def project_to_communes(self, communes: pd.DataFrame, anchor_weather: dict) -> pd.DataFrame:
@@ -82,6 +111,7 @@ class FranceMeteo:
             projected[f"wind_{i}"] = anchor_weather["winds"][idx, i]
             projected[f"humidity_{i}"] = anchor_weather["hums"][idx, i]
             projected[f"apparent_{i}"] = anchor_weather["apparents"][idx, i]
+            projected[f"radiation_{i}"] = anchor_weather["radiations"][idx, i]
         projected["start_hint"] = np.where(projected["temp_0"] < 5, "Allumage immédiat conseillé", "Surveiller la baisse nocturne")
         return projected
 

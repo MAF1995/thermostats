@@ -173,7 +173,7 @@ class MapEngine:
         self,
         df: pd.DataFrame,
         layer: str,
-        values: pd.Series,
+        values: pd.Series | Sequence | None,
         colorscale: str,
         unit: str,
         sizes: Sequence | None = None,
@@ -182,17 +182,32 @@ class MapEngine:
     ):
         if label_fields is None:
             label_fields = ["city"] if "city" in df.columns else list(df.columns[:1])
-        custom = df[label_fields].values
+        available_fields = [field for field in label_fields if field in df.columns]
+        if not available_fields:
+            available_fields = [df.columns[0]]
+        custom = df[available_fields].astype(str).to_numpy()
+
+        if values is None:
+            values_series = pd.Series([float("nan")] * len(df))
+        else:
+            values_series = pd.Series(values).reset_index(drop=True)
+            if len(values_series) < len(df):
+                values_series = values_series.reindex(range(len(df)), fill_value=float("nan"))
+            elif len(values_series) > len(df):
+                values_series = values_series.iloc[: len(df)]
+
         colorbar = None
         if show_scale:
             colorbar = dict(title=f"{layer} ({unit})", x=-0.07, len=0.4)
-        return go.Scattermapbox(
+
+        base_sizes = sizes if sizes is not None else [9] * len(df)
+        return go.Scattermap(
             lat=df["lat"],
             lon=df["lon"],
             mode="markers",
             marker=dict(
-                size=sizes if sizes is not None else 9,
-                color=values,
+            size=list(base_sizes),
+                color=values_series.tolist(),
                 colorscale=colorscale,
                 showscale=show_scale,
                 opacity=0.75,
@@ -253,15 +268,32 @@ class MapEngine:
     def base_figure(self, center_lat=46.5, center_lon=2.5, zoom=4):
         return go.Figure(
             layout=go.Layout(
-                mapbox_style="carto-positron",
-                mapbox_center={"lat": center_lat, "lon": center_lon},
-                mapbox_zoom=zoom,
+                map=dict(
+                    style="carto-positron",
+                    center={"lat": center_lat, "lon": center_lon},
+                    zoom=zoom,
+                ),
                 margin={"r": 0, "t": 0, "l": 0, "b": 0},
                 height=650,
             )
         )
 
     def add_timelapse_controls(self, fig: go.Figure):
+        frames = list(fig.frames) if fig.frames else []
+        if not frames:
+            return fig
+
+        steps = []
+        for idx, frame in enumerate(frames):
+            frame_name = getattr(frame, "name", str(idx)) or str(idx)
+            steps.append(
+                {
+                    "args": [[frame_name], {"frame": {"duration": 0, "redraw": True}}],
+                    "label": frame_name,
+                    "method": "animate",
+                }
+            )
+
         fig.update_layout(
             updatemenus=[
                 {
@@ -279,24 +311,13 @@ class MapEngine:
                     ],
                 }
             ],
-            sliders=[
-                {
-                    "steps": [
-                        {
-                            "args": [[frame.name], {"frame": {"duration": 0, "redraw": True}}],
-                            "label": frame.name,
-                            "method": "animate",
-                        }
-                        for frame in (fig.frames or [])
-                    ]
-                }
-            ],
+            sliders=[{"steps": steps}]
         )
         return fig
 
     def pick_on_map(self, fig: go.Figure, lat: float, lon: float):
         fig.add_trace(
-            go.Scattermapbox(
+            go.Scattermap(
                 lat=[lat],
                 lon=[lon],
                 mode="markers+text",

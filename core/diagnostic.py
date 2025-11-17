@@ -4,6 +4,14 @@ class Diagnostic:
         self.cfg = config
         self.meteo = meteo or {}
 
+    def _cfg_value(self, *keys, default="-"):
+        for key in keys:
+            if hasattr(self.cfg, key):
+                return getattr(self.cfg, key)
+            if isinstance(self.cfg, dict) and key in self.cfg:
+                return self.cfg[key]
+        return default
+
     def classify(self):
         if self.loss < 80:
             return "faible"
@@ -41,9 +49,13 @@ class Diagnostic:
         return " ".join(parts)
 
     def construction_profile(self):
+        structure = self._cfg_value("structure")
+        isolation = self._cfg_value("isolation", "isolation_level")
+        vmc = self._cfg_value("vmc")
+        glazing = self._cfg_value("glazing", "vitrage")
         return (
-            f"Structure: {self.cfg.structure} · Isolation: {self.cfg.isolation} · "
-            f"VMC: {self.cfg.vmc} · Vitrage: {self.cfg.glazing}"
+            f"Structure: {structure} · Isolation: {isolation} · "
+            f"VMC: {vmc} · Vitrage: {glazing}"
         )
 
     def recommendation(self):

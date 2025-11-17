@@ -18,6 +18,65 @@ INSULATION_TYPES = {
     "liège": {"cap_factor": 1.06, "loss_factor": 0.76},
 }
 
+ISOLATION_NORM_METADATA = {
+    "RT1974": {
+        "label": "RT 1974 — premières exigences nationales",
+        "years": "1974-1982",
+        "factor": 1.25,
+        "tooltip": "Isolation minimale sur planchers/plafonds, simples vitrages généralisés (U ≈ 1.8 W/m²K).",
+    },
+    "RT1982": {
+        "label": "RT 1982 — murs doublés, premières laines minérales",
+        "years": "1982-1988",
+        "factor": 1.18,
+        "tooltip": "Doubles cloisons maçonnées, toitures R≈2.5, généralisation du double vitrage sur façades principales.",
+    },
+    "RT1988": {
+        "label": "RT 1988 — isolation renforcée",
+        "years": "1988-2000",
+        "factor": 1.12,
+        "tooltip": "Toitures R≈3.3, rupteurs de ponts thermiques, menuiseries PVC double vitrage.",
+    },
+    "RT2000": {
+        "label": "RT 2000 — arrivée des rupteurs",
+        "years": "2000-2005",
+        "factor": 1.02,
+        "tooltip": "Étanchéité renforcée, façades R≥2.8, menuiseries Uw≈2.6, premières VMC hygro.",
+    },
+    "RT2005": {
+        "label": "RT 2005 — BBC précurseur",
+        "years": "2005-2012",
+        "factor": 0.95,
+        "tooltip": "Isolation murs R≈3.7, toitures R≈5, menuiseries Uw≈1.8, généralisation VMC hygro B.",
+    },
+    "BBC2009": {
+        "label": "Label BBC Effinergie 2009",
+        "years": "2009-2012",
+        "factor": 0.9,
+        "tooltip": "Maisons <50 kWh/m².an, ponts thermiques traités, triple vitrage partiel.",
+    },
+    "RT2012": {
+        "label": "RT 2012 — référence rénovation complète",
+        "years": "2013-2021",
+        "factor": 0.85,
+        "tooltip": "Maison <50 kWh/m².an, toitures R≥8, murs R≥4, Uw ≈ 1.6, VMC double flux fréquente.",
+    },
+    "RE2020": {
+        "label": "RE 2020 — enveloppes biosourcées",
+        "years": "2022-aujourd'hui",
+        "factor": 0.78,
+        "tooltip": "Ubat <0.6, menuiseries Uw≤1.3, traitement carbone ACV, protections solaires dynamiques.",
+    },
+    "PASSIVE": {
+        "label": "Maison passive / PHI",
+        "years": "Depuis 2015",
+        "factor": 0.68,
+        "tooltip": "Uwall ≈0.15, Uw ≤0.8, étanchéité n50<0.6 vol/h, VMC double flux haut rendement.",
+    },
+}
+
+ISOLATION_LEVEL_FACTORS = {code: meta["factor"] for code, meta in ISOLATION_NORM_METADATA.items()}
+
 SPECIAL_STRUCTURES = {
     "Maison semi-enterrée": {"capacitance_kwh_m3": 0.00050, "loss_w_k": 0.55},
     "Serre en verre": {"capacitance_kwh_m3": 0.00028, "loss_w_k": 1.20},
@@ -46,6 +105,12 @@ INERTIA_LABELS = {
     "faible": 2,
     "moyenne": 5,
     "forte": 10,
+}
+
+INERTIA_MULTIPLIERS = {
+    "faible": 0.85,
+    "moyenne": 1.0,
+    "forte": 1.25,
 }
 
 
@@ -83,25 +148,28 @@ class UserConfig:
 
     def tau_hours(self) -> float:
         structure = STRUCTURE_PRESETS.get(self.structure)
+        inertia_factor = INERTIA_MULTIPLIERS.get(self.inertia_level, 1.0)
         if structure:
             capacitance = structure["capacitance_kwh_m3"] * self.volume_m3
             g_w_k = structure["loss_w_k"]
             tau_structure = (capacitance * 1000) / max(g_w_k, 1e-3)
-            return max(1.5, tau_structure / 3600)  # en heures
-        return INERTIA_LABELS.get(self.inertia_level, 5)
+            return max(1.5, (tau_structure / 3600) * inertia_factor)  # en heures
+        return INERTIA_LABELS.get(self.inertia_level, 5) * inertia_factor
 
     def capacitance_kwh(self) -> float:
+        inertia_factor = INERTIA_MULTIPLIERS.get(self.inertia_level, 1.0)
         structure = STRUCTURE_PRESETS.get(self.structure)
         if structure:
-            return structure["capacitance_kwh_m3"] * self.volume_m3
-        return 0.34 * self.volume_m3 / 1000
+            return structure["capacitance_kwh_m3"] * self.volume_m3 * inertia_factor
+        return (0.34 * self.volume_m3 / 1000) * inertia_factor
 
     def loss_w_per_k(self) -> float:
         structure = STRUCTURE_PRESETS.get(self.structure)
         base = structure["loss_w_k"] if structure else 0.9
         vmc_factor = VMC_OPTIONS.get(self.vmc, 1.0)
         glazing_factor = GLAZING_TYPES.get(self.glazing, 1.0)
-        return base * vmc_factor * glazing_factor
+        isolation_factor = ISOLATION_LEVEL_FACTORS.get(self.isolation, 1.0)
+        return base * vmc_factor * glazing_factor * isolation_factor
 
     def validate(self) -> bool:
         if self.volume_m3 <= 0:
