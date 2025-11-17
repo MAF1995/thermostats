@@ -32,20 +32,6 @@ def apply_timeline_styling_day_night(fig: go.Figure, hours: list[str]):
                 layer="below",
             )
         )
-    current_hour = pd.Timestamp.now().hour
-    current_label = hours[min(current_hour, len(hours) - 1)]
-    shapes.append(
-        dict(
-            type="line",
-            xref="x",
-            yref="paper",
-            x0=current_label,
-            x1=current_label,
-            y0=0,
-            y1=1,
-            line=dict(color="#2c3e50", width=2, dash="dot"),
-        )
-    )
     fig.update_layout(shapes=shapes)
     return fig
 
@@ -55,13 +41,8 @@ def sidebar_inputs():
     st.sidebar.info("Ajustez les paramètres de votre habitation pour simuler le comportement thermique.")
     volume = st.sidebar.number_input("Volume chauffé (m³)", min_value=20.0, max_value=1200.0, value=250.0)
     inertia = st.sidebar.selectbox("Inertie thermique (label)", ["faible", "moyenne", "forte"], index=1)
-    structure = st.sidebar.selectbox(
-        "Structure / paroi",
-        UserConfig.structures(),
-        index=1,
-        help="Familles structure/isolant générées automatiquement (C et G).",
-    )
-    glazing = st.sidebar.selectbox("Type de vitrage", UserConfig.glazing_choices(), index=1)
+    structure = st.sidebar.selectbox("Structure / paroi", UserConfig.structures(), index=1,
+                                     help="Détermine automatiquement C et G (inertie et pertes)")
     vmc = st.sidebar.selectbox("VMC", UserConfig.vmc_choices(), help="Impacte les infiltrations d'air")
     power = st.sidebar.number_input("Puissance poêle (kW)", min_value=1.0, max_value=20.0, value=8.0)
     efficiency = st.sidebar.slider("Rendement", min_value=0.5, max_value=1.0, value=0.85)
@@ -81,19 +62,28 @@ def sidebar_inputs():
         st.sidebar.caption("Les coordonnées sont synchronisées avec la carte France.")
 
     st.sidebar.markdown("### Isolation")
+    iso_labels = {
+        "faible": "Années 50–80, simple vitrage, ponts thermiques",
+        "moyenne": "Années 90–2010, double vitrage",
+        "forte": "RT2012 ou rénovation complète",
+    }
     isolation = st.sidebar.selectbox(
-        "Isolation", ["faible", "moyenne", "forte"],
-        format_func=lambda x: {
-            "faible": "Années 50–80, simple vitrage, ponts thermiques",
-            "moyenne": "Années 90–2010, double vitrage",
-            "forte": "RT2012 ou rénovation complète",
-        }.get(x, x),
+        "Isolation",
+        ["faible", "moyenne", "forte"],
+        format_func=lambda x: iso_labels.get(x, str(x)),
     )
 
     st.sidebar.markdown("### Poêle")
-    pellet_price = st.sidebar.number_input("Prix du sac de pellets (15 kg)", min_value=3.0, max_value=20.0, value=4.5)
-    electric_price = st.sidebar.number_input("Prix électricité (€/kWh)", min_value=0.05, max_value=1.0, value=0.18, step=0.01)
+    pellet_price = st.sidebar.number_input("Prix du sac de pellets (15 kg)", min_value=3.0, max_value=20.0, value=7.5)
     hours_on = st.sidebar.slider("Durée de chauffe prévue (h)", 0, 24, 6)
+
+    # Déduire un type de vitrage (glazing) à partir du niveau d'isolation si non spécifié explicitement
+    glazing_map = {
+        "faible": "simple",
+        "moyenne": "double",
+        "forte": "triple",
+    }
+    glazing = glazing_map.get(isolation, "double")
 
     cfg = UserConfig(
         volume_m3=volume,
@@ -107,11 +97,11 @@ def sidebar_inputs():
         isolation=isolation,
         structure=structure,
         vmc=vmc,
-        pellet_price_bag=pellet_price,
         glazing=glazing,
+        pellet_price_bag=pellet_price,
     )
 
-    return cfg, pellet_price, electric_price, hours_on, map_engine
+    return cfg, pellet_price, hours_on, map_engine
 
 
 def load_meteo(cfg):
@@ -137,9 +127,9 @@ def compute_projection(cfg, df, hours_on):
     return proj, model
 
 
-def compute_kpis(cfg, df, hours_on, electric_price, pellet_df):
-    kpi = KPIEngine(electric_price)
-    cost = kpi.daily_cost(pellet_df, hours_on, standby_watts=60)
+def compute_kpis(cfg, df, hours_on, price, pellet_df):
+    kpi = KPIEngine(price)
+    cost = kpi.daily_cost(hours_on, cfg.power_kw)
     deg = kpi.degree_day_ratio(df)
     loss = kpi.thermal_loss(cfg.volume_m3, cfg.tau_hours())
     pellet_cost = kpi.pellet_cost(pellet_df)
@@ -162,6 +152,7 @@ def render_weather_tab(df, indoor_proj, pellet_df, hours_on):
             "Température extérieure (°C)": df["temp_ext"].head(horizon).values,
             "Température intérieure projetée (°C)": indoor_projection.values,
             "Vent (km/h)": df["wind"].head(horizon).values,
+            "Consommation pellet (sac/h)": pellet_df["bags_used"].reindex(range(horizon)).fillna(0).values,
         }
     )
     meteo_long = meteo_plot.melt(id_vars="Heure (24h)", var_name="Mesure", value_name="Valeur")
@@ -172,16 +163,11 @@ def render_weather_tab(df, indoor_proj, pellet_df, hours_on):
         y="Valeur",
         color="Mesure",
         markers=True,
-        title="Prévisions sur 24h (températures et vent)",
-        color_discrete_map={
-            "Température extérieure (°C)": "#1f77b4",
-            "Température intérieure projetée (°C)": "#8d6e63",
-            "Vent (km/h)": "#4fc3f7",
-        },
+        title="Prévisions sur 24h (températures, vent et pellet)",
     )
     fig_meteo.update_layout(
         xaxis_title="Heure (format 24h)",
-        yaxis_title="Valeur (°C / km/h)",
+        yaxis_title="Valeur (unités mixtes)",
         legend_title="Courbe",
     )
     st.plotly_chart(fig_meteo, use_container_width=True)
@@ -209,79 +195,35 @@ def render_thermal_tab(cfg, df, model, indoor_proj, pellet_df, hours_on):
     )
 
     fig = go.Figure()
-    common_hover = [
-        timeline_df["Vent"],
-        timeline_df["HR"],
-        timeline_df["Pellets sac/h"],
-    ]
-    fig.add_trace(
-        go.Scatter(
-            x=timeline_df["Heure"],
-            y=timeline_df["Température intérieure projetée"],
-            name="Température intérieure (°C)",
-            mode="lines+markers",
-            line=dict(color="#8d6e63"),
-            marker=dict(color="#8d6e63"),
-            hovertemplate=(
-                "Heure: %{x}<br>Intérieure: %{y:.1f}°C" "<br>Vent: %{customdata[0]:.0f} km/h" "<br>HR: %{customdata[1]:.0f}%" "<br>Pellets: %{customdata[2]:.2f} sac/h<extra></extra>"
-            ),
-            customdata=list(zip(*common_hover)),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=timeline_df["Heure"],
-            y=[cfg.temp_target] * horizon,
-            name="Consigne (°C)",
-            mode="lines",
-            line=dict(dash="dash", color="#2ca02c"),
-            hovertemplate="Température cible : %{y:.1f}°C<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=timeline_df["Heure"],
-            y=timeline_df["Température extérieure"],
-            name="Température extérieure (°C)",
-            mode="lines+markers",
-            line=dict(color="#1f77b4"),
-            marker=dict(color="#1f77b4"),
-            hovertemplate="Heure: %{x}<br>Extérieure: %{y:.1f}°C<br>Vent: %{customdata[0]:.0f} km/h<extra></extra>",
-            customdata=list(zip(timeline_df["Vent"])),
-        )
-    )
-    recharge_hours = [hours_axis[i] for i in pellet_df.index[pellet_df["recharge"]]]
-    if recharge_hours:
-        fig.add_trace(
-            go.Scatter(
-                x=recharge_hours,
-                y=[timeline_df["Température intérieure projetée"].min() - 0.5] * len(recharge_hours),
-                mode="markers+text",
-                text=["Recharge pellet"] * len(recharge_hours),
-                textposition="top center",
-                marker_symbol="triangle-up",
-                marker_color="#e67e22",
-                name="Points de recharge",
-                hovertemplate="Recharge pellet<extra></extra>",
-            )
-        )
+    fig.add_trace(go.Scatter(x=timeline_df["Heure"], y=timeline_df["Température intérieure projetée"],
+                            name="Intérieure projetée (°C)", mode="lines+markers"))
+    fig.add_trace(go.Scatter(x=timeline_df["Heure"], y=[cfg.temp_target]*horizon,
+                            name="Consigne", mode="lines", line=dict(dash="dash", color="#2ca02c")))
+    fig.add_trace(go.Scatter(x=timeline_df["Heure"], y=timeline_df["Température extérieure"],
+                            name="Température extérieure (°C)", mode="lines"))
+    fig.add_trace(go.Scatter(x=timeline_df["Heure"], y=timeline_df["Vent"],
+                            name="Vent (km/h)", mode="lines", yaxis="y2"))
+    fig.add_trace(go.Bar(x=timeline_df["Heure"], y=timeline_df["Pellets sac/h"],
+                        name="Pellets (sac/h)", yaxis="y3", marker_color="#e67e22", opacity=0.6))
 
     fig.update_layout(
-        xaxis=dict(domain=[0, 0.95]),
+        xaxis=dict(domain=[0, 0.9]),
         yaxis=dict(title="Température (°C)"),
+        yaxis2=dict(title="Vent (km/h)", overlaying="y", side="right", showgrid=False),
+        yaxis3=dict(title="Pellets (sac/h)", anchor="x", overlaying="y", side="right", position=0.92,
+                    showgrid=False, range=[0, max(0.2, timeline_df["Pellets sac/h"].max()*1.3)]),
         legend_title="Courbes",
         title="Fresque temporelle unifiée (24h)",
+        bargap=0.05,
     )
     fig = apply_timeline_styling_day_night(fig, hours_axis)
 
-    start_idx = 0
-    end_idx = max(0, min(hours_on - 1, len(hours_axis) - 1))
     hatched = dict(
         type="rect",
         xref="x",
         yref="paper",
-        x0=hours_axis[start_idx],
-        x1=hours_axis[end_idx],
+        x0=hours_axis[0],
+        x1=hours_axis[min(hours_on, len(hours_axis)-1)],
         y0=0,
         y1=1,
         fillcolor="rgba(255,165,0,0.15)",
@@ -289,14 +231,9 @@ def render_thermal_tab(cfg, df, model, indoor_proj, pellet_df, hours_on):
         layer="below",
     )
     fig.add_shape(hatched)
-    fig.add_annotation(
-        x=hours_axis[start_idx],
-        y=cfg.temp_target,
-        text="Attention – allumage",
-        showarrow=True,
-        arrowhead=2,
-        bgcolor="rgba(255,165,0,0.2)",
-    )
+    fig.add_annotation(x=hours_axis[min(hours_on, len(hours_axis)-1)], y=cfg.temp_target,
+                        text="Attention – allumage", showarrow=True, arrowhead=2,
+                        bgcolor="rgba(255,165,0,0.2)")
 
     st.plotly_chart(fig, use_container_width=True)
 
@@ -309,23 +246,11 @@ def render_kpi_tab(cost, deg, loss, pellet_cost, electric_cost):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric(
-            "Coût journalier estimé (€)",
-            round(cost, 2),
-            help="Consommation pellets + électricité du poêle (veille) valorisées avec les prix saisis.",
-        )
+        st.metric("Coût journalier estimé (€)", round(cost, 2), help="Consommation totale du poêle multipliée par le prix de l'énergie.")
     with col2:
-        st.metric(
-            "Degré-jours (°C·jour)",
-            round(deg, 2) if deg is not None else "N/A",
-            help="Somme horaire des écarts à 18°C rapportée à la journée : mesure la sévérité du froid.",
-        )
+        st.metric("Degré-jours", deg if deg is not None else "N/A", help="Différence cumulée entre consigne (18°C) et température extérieure sur la période.")
     with col3:
-        st.metric(
-            "Déperdition thermique (W/K)",
-            round(loss, 2),
-            help="Puissance perdue pour chaque degré d'écart entre intérieur et extérieur.",
-        )
+        st.metric("Déperdition thermique (W/K)", round(loss, 2), help="Puissance perdue pour chaque degré d'écart entre intérieur et extérieur.")
 
     st.markdown(
         f"Coût pellet: **{pellet_cost:.2f} €** — Coût élec du poêle: **{electric_cost:.2f} €**",
@@ -340,6 +265,7 @@ def render_kpi_tab(cost, deg, loss, pellet_cost, electric_cost):
         txt = "moyenne"
     else:
         color = "#D9534F"
+        txt = "forte"
 
     st.markdown(
         f"""
@@ -411,15 +337,17 @@ def render_map_tab(cfg, map_engine: MapEngine):
 
     st.subheader("Carte thermique de la France")
     fm = FranceMeteo()
+    # Provide the communes DataFrame required by FranceMeteo.fetch
+    communes_for_fetch = map_engine.load_communes()
+    df_fr_raw = fm.fetch(communes_for_fetch)
+    # Ensure the fetch result is a DataFrame (FranceMeteo.fetch may return a dict)
+    if not isinstance(df_fr_raw, pd.DataFrame):
+        df_fr = pd.DataFrame(df_fr_raw)
+    else:
+        df_fr = df_fr_raw
 
     zoom = st.slider("Zoom carte", min_value=3.0, max_value=8.0, value=4.5, step=0.5)
-    communes_all = map_engine.load_communes()
-    communes = map_engine.filter_by_zoom(communes_all, zoom)
-    communes = communes.rename(columns={"nom": "city"}) if "nom" in communes.columns else communes
-
-    weather = fm.fetch(communes)
-    df_fr = weather["data"]
-    timeline = list(weather["timeline"].strftime("%d/%m %Hh"))
+    communes = map_engine.filter_by_zoom(communes_for_fetch, zoom)
 
     layer_options = {
         "Température": ("temp", "RdBu_r", "°C"),
@@ -434,22 +362,14 @@ def render_map_tab(cfg, map_engine: MapEngine):
     if not selected_layers:
         selected_layers = ["Température"]
 
-    base_fig = map_engine.base_figure(center_lat=cfg.latitude, center_lon=cfg.longitude, zoom=zoom)
-
-    size_hint = df_fr["pop"].fillna(0).apply(lambda p: max(6, min(18, (p + 1) ** 0.25))) if "pop" in df_fr else None
+    base_fig = map_engine.base_figure(center_lat=cfg.latitude, center_lon=cfg.longitude, zoom=int(zoom))
 
     for layer in selected_layers:
         col, scale, unit = layer_options[layer]
-        base_fig.add_trace(map_engine.build_layer(df_fr, layer, df_fr[f"{col}_0"], scale, unit, sizes=size_hint))
+        base_fig.add_trace(map_engine.build_layer(df_fr, layer, df_fr[col], scale, unit))
 
-    frames = map_engine.calc_timelapse_frames(
-        df_fr,
-        timeline,
-        {
-            name: {"scale": layer_options[name][1], "unit": layer_options[name][2], "col": layer_options[name][0]}
-            for name in selected_layers
-        },
-    )
+    timeline = pd.date_range(pd.Timestamp.now(), periods=6, freq="3H").tolist()
+    frames = map_engine.calc_timelapse_frames(df_fr, timeline, {name: {"scale": layer_options[name][1], "unit": layer_options[name][2]} for name in selected_layers})
     base_fig.frames = frames
     map_engine.add_timelapse_controls(base_fig)
     map_engine.pick_on_map(base_fig, cfg.latitude, cfg.longitude)
@@ -462,7 +382,7 @@ def render_map_tab(cfg, map_engine: MapEngine):
 def main():
     st.title("Thermo-Stats")
 
-    cfg, pellet_price, electric_price, hours_on, map_engine = sidebar_inputs()
+    cfg, price, hours_on, map_engine = sidebar_inputs()
 
     if not cfg.validate():
         st.error("Paramètres invalides.")
@@ -482,7 +402,7 @@ def main():
     pellet_engine = PelletEngine(cfg.power_kw, cfg.efficiency, cfg.pellet_price_bag)
     pellet_df = pellet_engine.compute_pellet_usage(hours=24, target_temp=cfg.temp_target, active_mask=[i < hours_on for i in range(24)])
 
-    cost, deg, loss, pellet_cost, electric_cost = compute_kpis(cfg, df, hours_on, electric_price, pellet_df)
+    cost, deg, loss, pellet_cost, electric_cost = compute_kpis(cfg, df, hours_on, price, pellet_df)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Météo", "Thermique", "KPIs", "Diagnostic", "Carte France"])
 
