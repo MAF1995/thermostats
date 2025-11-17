@@ -124,7 +124,17 @@ graph TD
 
 ---
 
-# 7. Installation
+# 7. Couverture cartographique enrichie
+
+La carte embarque un maillage hors-ligne d'environ 35 000 communes synthétiques couvrant chaque département et région. Les pastilles de température sont disponibles simultanément par niveaux (régions, départements, communes) et sont animées sur 24h (température, vent, humidité). Un cache `data/communes_cache.csv` est généré automatiquement si l'accès aux jeux de données publics est bloqué.
+
+# 8. KPIs dynamiques
+
+Les KPIs (coût journalier, degrés-jours ramenés à 24h, pertes W/K) se recalculent en temps réel à partir des paramètres saisis dans le panneau latéral : structure/isolant/vitrage, VMC, volume et prix du sac de pellets. Le coût inclut la consommation pellets et l'électricité de veille du poêle pour rester cohérent avec les réglages en cours.
+
+---
+
+# 9. Installation
 
 ## 7.1 Cloner le dépôt
 
@@ -172,7 +182,7 @@ Windows (CMD)
 <pre class="overflow-visible!" data-start="3922" data-end="3954"><div class="contain-inline-size rounded-2xl relative bg-token-sidebar-surface-primary"><div class="sticky top-9"><div class="absolute end-0 bottom-0 flex h-9 items-center pe-2"><div class="bg-token-bg-elevated-secondary text-token-text-secondary flex items-center gap-4 rounded-sm px-2 font-sans text-xs"></div></div></div><div class="overflow-y-auto p-4" dir="ltr"><code class="whitespace-pre! language-bash"><span><span>streamlit run app.py
 </span></span></code></div></div></pre>
 
-L’application s’ouvrira automatiquement dans votre navigateur.
+L'application s'ouvrira automatiquement dans votre navigateur.
 
 ---
 

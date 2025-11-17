@@ -1,7 +1,16 @@
 class Diagnostic:
-    def __init__(self, thermal_loss, isolation_level):
+    def __init__(self, thermal_loss, config, meteo=None):
         self.loss = thermal_loss
-        self.iso = isolation_level
+        self.cfg = config
+        self.meteo = meteo or {}
+
+    def _cfg_value(self, *keys, default="-"):
+        for key in keys:
+            if hasattr(self.cfg, key):
+                return getattr(self.cfg, key)
+            if isinstance(self.cfg, dict) and key in self.cfg:
+                return self.cfg[key]
+        return default
 
     def classify(self):
         if self.loss < 80:
@@ -11,35 +20,57 @@ class Diagnostic:
         return "forte"
 
     def severity_score(self):
-        if self.loss < 80:
-            return 1
-        if self.loss < 150:
-            return 2
-        return 3
+        base = 1
+        if self.loss >= 80:
+            base = 2 if self.loss < 150 else 3
+        wind = self.meteo.get("wind_mean", 0)
+        humidity = self.meteo.get("humidity_mean", 50)
+        weather_bonus = 0
+        if wind > 20:
+            weather_bonus += 0.5
+        if humidity > 75:
+            weather_bonus += 0.5
+        return min(3, base + weather_bonus)
 
     def explanation(self):
+        wind = self.meteo.get("wind_mean")
+        humidity = self.meteo.get("humidity_mean")
+        parts = []
         if self.loss < 80:
-            return "Structure peu sensible aux variations extérieures."
-        if self.loss < 150:
-            return "Maison modérément exposée à la météo et au vent."
-        return "Habitation très sensible aux variations extérieures."
+            parts.append("Structure peu sensible aux variations extérieures.")
+        elif self.loss < 150:
+            parts.append("Maison modérément exposée aux vents.")
+        else:
+            parts.append("Habitation très sensible aux pertes thermiques.")
+        if wind is not None:
+            parts.append(f"Vent moyen {wind:.1f} km/h amplifiant les infiltrations.")
+        if humidity is not None and humidity > 70:
+            parts.append("Humidité élevée favorisant le refroidissement des parois.")
+        return " ".join(parts)
 
-    def wind_impact(self, mean_wind):
-        impact = self.loss * (0.02 * mean_wind)
-        return round(impact, 2)
+    def construction_profile(self):
+        structure = self._cfg_value("structure")
+        isolation = self._cfg_value("isolation", "isolation_level")
+        vmc = self._cfg_value("vmc")
+        glazing = self._cfg_value("glazing", "vitrage")
+        return (
+            f"Structure: {structure} · Isolation: {isolation} · "
+            f"VMC: {vmc} · Vitrage: {glazing}"
+        )
 
     def recommendation(self):
         cls = self.classify()
         if cls == "faible":
-            return "Ajuster uniquement les horaires du poêle selon la météo."
+            return "Optimiser les horaires du poêle en suivant la météo locale."
         if cls == "moyenne":
-            return "Réduire les infiltrations d’air et surveiller les jours venteux."
-        return "L'amélioration de l'isolation ou le renforcement des seuils peut réduire significativement les pertes."
+            return "Calfeutrer les points sensibles (menuiseries, VMC) les jours venteux et humides."
+        return "Renforcer l'isolation, moderniser le vitrage ou passer en VMC double flux pour réduire les pertes."
 
     def summary(self):
         return {
             "classe": self.classify(),
             "score": self.severity_score(),
             "explication": self.explanation(),
-            "recommandation": self.recommendation()
+            "recommandation": self.recommendation(),
+            "construction": self.construction_profile(),
         }
