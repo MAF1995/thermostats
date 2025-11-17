@@ -124,7 +124,17 @@ graph TD
 
 ---
 
-# 7. Installation
+# 7. Couverture cartographique enrichie
+
+La carte embarque un maillage hors-ligne d'environ 35 000 communes synthétiques couvrant chaque département et région. Les pastilles de température sont disponibles simultanément par niveaux (régions, départements, communes) et sont animées sur 24h (température, vent, humidité). Un cache `data/communes_cache.csv` est généré automatiquement si l'accès aux jeux de données publics est bloqué.
+
+# 8. KPIs dynamiques
+
+Les KPIs (coût journalier, degrés-jours ramenés à 24h, pertes W/K) se recalculent en temps réel à partir des paramètres saisis dans le panneau latéral : structure/isolant/vitrage, VMC, volume et prix du sac de pellets. Le coût inclut la consommation pellets et l'électricité de veille du poêle pour rester cohérent avec les réglages en cours.
+
+---
+
+# 9. Installation
 
 ## 7.1 Cloner le dépôt
 

@@ -1,22 +1,101 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
+
 class ThermalModel:
-    def __init__(self, tau_hours, volume_m3, power_kw, efficiency):
+    """1R-1C thermal model describing the indoor temperature dynamics."""
+
+    def __init__(
+        self,
+        tau_hours=None,
+        volume_m3=None,
+        power_kw=None,
+        efficiency=None,
+        infiltration_factor: float = 1.0,
+        capacitance_kwh: float | None = None,
+        loss_w_per_k: float | None = None,
+        **legacy_kwargs,
+    ):
+        """
+        Accept both the new ``tau_hours`` keyword and legacy positional/keyword arguments.
+
+        Additional parameters allow the RC model to integrate infiltration (VMC) and
+        inertial presets coming from the structure selection.
+        """
+
+        if tau_hours is None:
+            tau_hours = legacy_kwargs.pop("tau", None)
+
+        if volume_m3 is None and legacy_kwargs:
+            volume_m3 = legacy_kwargs.pop("volume_m3", None) or legacy_kwargs.pop("volume", None)
+        if power_kw is None and legacy_kwargs:
+            power_kw = legacy_kwargs.pop("power_kw", None) or legacy_kwargs.pop("power", None)
+        if efficiency is None and legacy_kwargs:
+            efficiency = legacy_kwargs.pop("efficiency", None) or legacy_kwargs.pop("eff", None)
+
+        missing = [
+            name for name, val in {
+                "tau_hours": tau_hours,
+                "volume_m3": volume_m3,
+                "power_kw": power_kw,
+                "efficiency": efficiency,
+            }.items()
+            if val is None
+        ]
+        if missing:
+            raise ValueError(f"ThermalModel missing required parameters: {', '.join(missing)}")
+
         self.tau = tau_hours
         self.volume = volume_m3
         self.power = power_kw
         self.eff = efficiency
-        self.C = 0.34 * volume_m3
+        self.infiltration_factor = infiltration_factor
+        # Volumetric heat capacity of air ~0.34 Wh/(m³·K)
+        base_C = 0.34 * volume_m3 / 1000  # kWh/K
+        self.C = capacitance_kwh if capacitance_kwh is not None else base_C
+        self.loss_w_per_k = loss_w_per_k
+
+    @property
+    def _capacitance_kwh(self):
+        """Heat capacity expressed in kWh/K for internal calculations."""
+        return self.C
+
+    @property
+    def _heating_rate(self):
+        """Equivalent temperature gain per hour from the stove (K/h)."""
+        if self._capacitance_kwh == 0:
+            return 0.0
+        return (self.power * self.eff) / self._capacitance_kwh
+
+    def thermal_resistance(self):
+        """Return the lumped thermal resistance (h·K/kWh)."""
+        if self.C == 0:
+            return np.inf
+        return self.tau / self.C
+
+    def heat_capacity(self):
+        """Return the lumped heat capacity (kWh/K)."""
+        return self.C
+
+    def _tau_effective(self):
+        if self.loss_w_per_k:
+            g_kwh_per_hk = self.loss_w_per_k / 1000
+            if self.C == 0 or g_kwh_per_hk == 0:
+                return self.tau
+            return max(0.5, (self.C / g_kwh_per_hk) / self.infiltration_factor)
+        return self.tau / max(self.infiltration_factor, 1e-3)
 
     def heat_step(self, T_int, T_ext_eff, dt_hours):
-        num = (self.power * 1000 * self.eff) * dt_hours
-        dT = num / (self.C * 1000)
-        T_target = T_ext_eff + (T_int - T_ext_eff) * np.exp(-dt_hours / self.tau)
-        return T_target + dT
+        tau_eff = self._tau_effective()
+        dT_env = (T_ext_eff - T_int) * (dt_hours / tau_eff)
+        dT_poele = self._heating_rate * dt_hours
+        return T_int + dT_env + dT_poele
 
     def cool_step(self, T_int, T_ext_eff, dt_hours):
-        return T_ext_eff + (T_int - T_ext_eff) * np.exp(-dt_hours / self.tau)
+        tau_eff = self._tau_effective()
+        return T_int + (T_ext_eff - T_int) * (dt_hours / tau_eff)
 
     def simulate(self, T_int_start, ext_series, wind_series, hours_on):
         results = []
@@ -39,16 +118,24 @@ class ThermalModel:
     def time_to_reach(self, T_int, T_target, T_ext_eff):
         if T_target <= T_int:
             return 0
-        num = (T_target - T_int) * self.C
-        den = (self.power * 1000 * self.eff)
-        if den <= 0:
+        heating_rate = self._heating_rate
+        if heating_rate <= 0:
             return None
-        x = 1 - (num / den)
-        if x <= 0 or x >= 1:
+
+        steady_state = T_ext_eff + self.tau * heating_rate
+        A = T_int - steady_state
+        B = T_target - steady_state
+
+        if A == 0:
             return None
-        dt = -self.tau * np.log(x)
+
+        ratio = B / A
+        if ratio <= 0 or ratio >= 1:
+            return None
+
+        dt = -self.tau * np.log(ratio)
         return dt
-    
+
     def time_series_until_target(self, T_int, T_target, T_ext_eff_series):
         temps = []
         T = T_int
