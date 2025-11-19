@@ -33,13 +33,13 @@ class FranceMeteo:
         On récupère un horizon de 24h à résolution horaire, puis on projette sur toutes les communes.
         """
 
-        temps, winds, hums, apparents, radiations = [], [], [], [], []
+        temps, winds, hums, apparents, radiations, wind_dirs = [], [], [], [], [], []
         timeline = None
         for _, row in anchors.iterrows():
             params = {
                 "latitude": row["lat"],
                 "longitude": row["lon"],
-                "hourly": "temperature_2m,relativehumidity_2m,windspeed_10m,apparent_temperature,shortwave_radiation",
+                "hourly": "temperature_2m,relativehumidity_2m,windspeed_10m,winddirection_10m,apparent_temperature,shortwave_radiation",
                 "timezone": "Europe/Paris",
             }
             try:
@@ -52,6 +52,7 @@ class FranceMeteo:
                 hums.append(np.array(data.get("relativehumidity_2m", [])[:frames]))
                 apparents.append(np.array(data.get("apparent_temperature", [])[:frames]))
                 radiations.append(np.array(data.get("shortwave_radiation", [])[:frames]))
+                wind_dirs.append(np.array(data.get("winddirection_10m", [])[:frames]))
             except Exception:
                 # Fallback doux si l'API est indisponible
                 if timeline is None:
@@ -62,6 +63,7 @@ class FranceMeteo:
                 hums.append(np.linspace(60, 90, frames))
                 apparents.append(base - 1.5)
                 radiations.append(np.linspace(50, 500, frames))
+                wind_dirs.append(np.linspace(0, 360, frames, endpoint=False))
 
         if timeline is None:
             timeline = pd.date_range(pd.Timestamp.now(), periods=frames, freq="H")
@@ -71,6 +73,7 @@ class FranceMeteo:
         hums = np.array(hums, dtype=float)
         apparents = np.array(apparents, dtype=float)
         radiations = np.array(radiations, dtype=float)
+        wind_dirs = np.array(wind_dirs, dtype=float)
 
         # Remplit les valeurs manquantes par la médiane des ancres disponibles
         def _fill_nan(arr):
@@ -88,6 +91,7 @@ class FranceMeteo:
         hums = _fill_nan(hums)
         apparents = _fill_nan(apparents)
         radiations = _fill_nan(radiations)
+        wind_dirs = _fill_nan(wind_dirs)
 
         return {
             "timeline": timeline,
@@ -97,6 +101,7 @@ class FranceMeteo:
             "apparents": apparents,
             "anchors": anchors.reset_index(drop=True),
             "radiations": radiations,
+            "wind_dirs": wind_dirs,
         }
 
     def project_to_communes(self, communes: pd.DataFrame, anchor_weather: dict) -> pd.DataFrame:
@@ -112,6 +117,7 @@ class FranceMeteo:
             projected[f"humidity_{i}"] = anchor_weather["hums"][idx, i]
             projected[f"apparent_{i}"] = anchor_weather["apparents"][idx, i]
             projected[f"radiation_{i}"] = anchor_weather["radiations"][idx, i]
+            projected[f"wind_dir_{i}"] = anchor_weather["wind_dirs"][idx, i]
         projected["start_hint"] = np.where(projected["temp_0"] < 5, "Allumage immédiat conseillé", "Surveiller la baisse nocturne")
         return projected
 

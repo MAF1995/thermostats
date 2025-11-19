@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 import math
 import html
+import os
+import time
 import numpy as np
 import streamlit as st
 import pandas as pd
@@ -17,10 +21,25 @@ from data.data_france import FranceMeteo
 
 DEFAULT_BAG_DURATION_HOURS = 14.0
 PLANNING_HORIZON_HOURS = 48
+STANDARD_HOME_SETTINGS = {
+    "area_m2": 100,
+    "ceiling_height": 2.5,
+    "tau_hours": 5.5,
+    "power_kw": 7.5,
+    "efficiency": 0.86,
+    "max_delta_per_hour": 2.2,
+}
+STANDARD_HOME_MODEL = ThermalModel(
+    tau_hours=STANDARD_HOME_SETTINGS["tau_hours"],
+    volume_m3=STANDARD_HOME_SETTINGS["area_m2"] * STANDARD_HOME_SETTINGS["ceiling_height"],
+    power_kw=STANDARD_HOME_SETTINGS["power_kw"],
+    efficiency=STANDARD_HOME_SETTINGS["efficiency"],
+)
 
 STOVE_MODES = {
     "Confort": {
-        "max_sessions": 3,
+        "min_sessions": 3,
+        "max_sessions": 4,
         "default_total_hours": 6,
         "max_session_hours": 3,
         "cooldown_minutes": 45,
@@ -28,7 +47,7 @@ STOVE_MODES = {
         "anchor_hours": [6, 13, 20],
         "anchor_slack": 2,
         "max_delta_per_hour": 2.5,
-        "description": "Jusqu'à 3 allumages pour rester proche de la consigne toute la journée.",
+        "description": "Entre 3 et 4 allumages resserrés pour rester proche de la consigne toute la journée.",
     },
     "Eco": {
         "max_sessions": 2,
@@ -117,6 +136,140 @@ VMC_METADATA = {
 VMC_ANNUAL_KWH = {key: meta["annual_kwh"] for key, meta in VMC_METADATA.items()}
 
 
+def _blend_hex(color_a: str, color_b: str, ratio: float) -> str:
+    ratio = max(0.0, min(1.0, float(ratio)))
+    try:
+        ca = tuple(int(color_a[i:i + 2], 16) for i in (1, 3, 5))
+        cb = tuple(int(color_b[i:i + 2], 16) for i in (1, 3, 5))
+    except Exception:
+        return color_a
+    mixed = tuple(int(ca[idx] + (cb[idx] - ca[idx]) * ratio) for idx in range(3))
+    return "#" + "".join(f"{channel:02X}" for channel in mixed)
+
+
+def temperature_color(temp: float | None) -> str:
+    if temp is None:
+        return "#30D158"
+    value = float(temp)
+    if value <= 10:
+        return "#3DC2FF"
+    if value <= 19:
+        return _blend_hex("#3DC2FF", "#30D158", (value - 10) / 9)
+    if value <= 24:
+        return _blend_hex("#30D158", "#7CF17F", (value - 19) / 5)
+    if value <= 30:
+        return _blend_hex("#7CF17F", "#FFB347", (value - 24) / 6)
+    return "#FF8C42"
+
+
+def performance_color(ratio: float | None) -> str:
+    if ratio is None:
+        return "#29D391"
+    pct = max(0.0, min(1.0, float(ratio)))
+    return _blend_hex("#FF5F6D", "#29D391", pct)
+
+
+def poll_domotic_sensor(sensor_id: str | None) -> float | None:
+    if not sensor_id:
+        return None
+    normalized = sensor_id.strip()
+    if not normalized:
+        return None
+    sensor_cache = st.session_state.get("domotic_sensors")
+    if isinstance(sensor_cache, dict) and normalized in sensor_cache:
+        try:
+            return float(sensor_cache[normalized])
+        except (TypeError, ValueError):
+            pass
+    try:
+        secrets_block = st.secrets.get("domotic_sensors", {})  # type: ignore[attr-defined]
+        if normalized in secrets_block:
+            return float(secrets_block[normalized])
+    except Exception:
+        pass
+    env_key = f"DOMOTIC_SENSOR_{normalized.upper()}"
+    env_value = os.environ.get(env_key)
+    if env_value is not None:
+        try:
+            return float(env_value)
+        except ValueError:
+            return None
+    return None
+
+
+def _safe_rerun():
+    rerun_fn = getattr(st, "rerun", None)
+    if callable(rerun_fn):
+        rerun_fn()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()  # type: ignore[attr-defined]
+
+
+def render_circular_performance_chart(score: float | None):
+    severity = 1.0 if score is None else max(1.0, min(3.0, float(score)))
+    severity_ratio = max(0.0, min(1.0, (severity - 1.0) / 2.0))
+    performance_ratio = 1.0 - severity_ratio
+    performance_pct = performance_ratio * 100
+    core_color = performance_color(performance_ratio)
+
+    segments = 48
+    theta_segment = [idx * (360 / segments) for idx in range(segments)]
+    ring_colors = [performance_color(idx / (segments - 1)) for idx in range(segments)]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Barpolar(
+            r=[1.05] * segments,
+            theta=theta_segment,
+            width=[360 / segments] * segments,
+            opacity=0.85,
+            marker=dict(color=ring_colors, line=dict(color="rgba(0,0,0,0)", width=0)),
+            hoverinfo="skip",
+        )
+    )
+
+    resolution = 120
+    theta_fill = [idx * (360 / resolution) for idx in range(resolution + 1)]
+    r_fill = [performance_ratio] * len(theta_fill)
+    fig.add_trace(
+        go.Scatterpolar(
+            theta=theta_fill,
+            r=r_fill,
+            fill="toself",
+            mode="lines",
+            line=dict(color=core_color, width=2),
+            fillcolor=_blend_hex("#FFFFFF", core_color, 0.25),
+            hovertemplate=f"Performance : {performance_pct:.1f}%<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        showlegend=False,
+        margin=dict(l=0, r=0, t=20, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(range=[0, 1.1], visible=False),
+            angularaxis=dict(showticklabels=False, ticks="", rotation=90, direction="clockwise"),
+        ),
+    )
+
+    fig.add_annotation(
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        text=(
+            "<span style='font-size:15px;color:#A8ADB5;'>Performance</span><br>"
+            f"<span style='font-size:30px;color:{core_color};font-weight:bold;'>{performance_pct:.0f}%</span>"
+        ),
+        showarrow=False,
+        align="center",
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
 def smooth_hourly_columns(df: pd.DataFrame, columns):
     if df is None or df.empty:
         return df
@@ -183,6 +336,45 @@ def summarize_pellet_usage(pellet_df: pd.DataFrame, horizon_hours: int, hours_pe
     }
 
 
+def derive_schedule_markers(
+    heating_plan: dict,
+    cfg: UserConfig,
+    model: ThermalModel,
+    target_temp: float,
+):
+    timestamps = heating_plan.get("timestamps", pd.Series([], dtype="datetime64[ns]"))
+    if not isinstance(timestamps, pd.Series):
+        timestamps = pd.Series(timestamps)
+    window_info = heating_plan.get("heating_windows", [])
+    ramp_cap = heating_plan.get("max_ramp_c_per_hour")
+    trigger_ts = None
+    reach_ts = None
+    if window_info and len(timestamps) > 0:
+        first_window = window_info[0]
+        preheat_idx = min(first_window["preheat_start"], len(timestamps) - 1)
+        trigger_ts = timestamps.iloc[preheat_idx]
+        start_idx = min(first_window["start_idx"], len(timestamps) - 1)
+        start_ts = timestamps.iloc[start_idx]
+        indoor_start = float(cfg.temp_current)
+        try:
+            indoor_start = float(heating_plan["indoor_series"].iloc[start_idx])
+            eff_temp = float(
+                heating_plan["temp_ext_series"].iloc[start_idx]
+                - 0.2 * heating_plan["wind_series"].iloc[start_idx]
+            )
+            eta_hours = model.time_to_reach(
+                indoor_start,
+                target_temp,
+                eff_temp,
+                max_delta_per_hour=ramp_cap,
+            )
+        except Exception:
+            eta_hours = None
+        eta_hours = enforce_realistic_eta(indoor_start, target_temp, eta_hours)
+        reach_ts = start_ts + pd.Timedelta(hours=max(0.0, eta_hours))
+    return trigger_ts, reach_ts
+
+
 def build_topline_summary(
     cfg: UserConfig,
     df: pd.DataFrame,
@@ -216,28 +408,10 @@ def build_topline_summary(
 
     trigger_label = "dès que possible"
     reach_label = "--"
-    window_info = heating_plan.get("heating_windows", [])
-    ramp_cap = heating_plan.get("max_ramp_c_per_hour")
-    if window_info and len(timestamps) > 0:
-        first_window = window_info[0]
-        preheat_idx = min(first_window["preheat_start"], len(timestamps) - 1)
-        trigger_ts = timestamps.iloc[preheat_idx]
+    trigger_ts, reach_ts = derive_schedule_markers(heating_plan, cfg, model, target_temp)
+    if trigger_ts is not None:
         trigger_label = _format_ts(trigger_ts)
-
-        start_idx = min(first_window["start_idx"], len(timestamps) - 1)
-        start_ts = timestamps.iloc[start_idx]
-        indoor_start = float(cfg.temp_current)
-        try:
-            indoor_start = float(heating_plan["indoor_series"].iloc[start_idx])
-            eff_temp = float(
-                heating_plan["temp_ext_series"].iloc[start_idx]
-                - 0.2 * heating_plan["wind_series"].iloc[start_idx]
-            )
-            eta_hours = model.time_to_reach(indoor_start, target_temp, eff_temp, max_delta_per_hour=ramp_cap)
-        except Exception:
-            eta_hours = None
-        eta_hours = enforce_realistic_eta(indoor_start, target_temp, eta_hours)
-        reach_ts = start_ts + pd.Timedelta(hours=max(0.0, eta_hours))
+    if reach_ts is not None:
         reach_label = _format_ts(reach_ts)
 
     ext_str = f"{ext_temp:.1f}°C dehors" if ext_temp is not None else "température extérieure inconnue"
@@ -291,6 +465,146 @@ def build_topline_summary(
         "</style>"
     )
     return style + f"<div class='hero-summary'><p>{summary_text}</p></div>"
+
+
+def render_green_dashboard(data: dict):
+    temp_ext = float(data.get("temp_ext", 0.0))
+    target_temp = float(data.get("temp_target", 21.0))
+    temp_current = float(data.get("temp_current", target_temp))
+    surface_label = data.get("surface_label", "N/A")
+    isolation_label = data.get("isolation_label", "Isolation")
+    trigger_label = data.get("heure_declenchement", "--")
+    reach_label = data.get("heure_objectif", "--")
+    pellets_48h = data.get("pellets_48h", 0.0)
+    cost_pellets = data.get("cost_pellets", 0.0)
+    cost_elec = data.get("cost_elec", 0.0)
+    temp_bounds = data.get("temp_bounds", (16.0, 25.0))
+    if "ui_temp_current" not in st.session_state:
+        st.session_state["ui_temp_current"] = temp_current
+    if "ui_temp_target" not in st.session_state:
+        st.session_state["ui_temp_target"] = target_temp
+
+    current_temp_state = float(st.session_state.get("ui_temp_current", temp_current))
+    target_temp_state = float(st.session_state.get("ui_temp_target", target_temp))
+
+    def _ensure_24h(label: str | None) -> str:
+        if not label or label.strip() == "--":
+            return "--"
+        parsed = pd.to_datetime(label, errors="coerce")
+        if isinstance(parsed, pd.Timestamp):
+            return parsed.strftime("%H:%M")
+        return label
+
+    trigger_label = _ensure_24h(str(trigger_label))
+    reach_label = _ensure_24h(str(reach_label))
+
+    min_temp, max_temp = temp_bounds
+
+    def update_session(key: str, value: float):
+        new_val = float(value)
+        prev = st.session_state.get(key)
+        prev_val = float(prev) if prev is not None else None
+        if prev_val is None or abs(prev_val - new_val) > 1e-6:
+            st.session_state[key] = new_val
+            _safe_rerun()
+
+    st.markdown(
+        """
+        <style>
+            .hero-condensed {background:#ffffff;border:1px solid #e2e8f0;border-radius:18px;padding:18px 22px;margin-bottom:26px;box-shadow:0 10px 30px rgba(15,23,42,0.08);} 
+            .hero-condensed h3 {margin:0 0 8px 0;font-size:1.05rem;color:#0f172a;text-transform:uppercase;letter-spacing:0.1em;} 
+            .hero-line {margin:4px 0;font-size:0.98rem;color:#0f172a;} 
+            .hero-pill {margin-top:12px;padding:10px 14px;border-radius:12px;background:#f0fdf4;border:1px solid #bbf7d0;font-weight:600;color:#065f46;} 
+            .hero-meta {margin-top:10px;font-size:0.9rem;color:#475569;} 
+            .hero-note {margin-top:6px;font-size:0.78rem;color:#94a3b8;} 
+            .hero-metrics {display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:0.9rem;color:#0f172a;} 
+            .hero-metrics span {background:#f8fafc;border:1px solid #e2e8f0;border-radius:999px;padding:4px 10px;} 
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    input_col, target_col, ext_col = st.columns([1.2, 1.2, 0.9])
+    with input_col:
+        current_value = st.number_input(
+            "Température actuelle (°C)",
+            min_value=float(min_temp - 5),
+            max_value=float(max_temp + 5),
+            value=float(current_temp_state),
+            step=0.1,
+            key="hero_temp_current_input",
+        )
+        update_session("ui_temp_current", float(current_value))
+        current_temp_state = float(st.session_state.get("ui_temp_current", current_value))
+    with target_col:
+        target_value = st.number_input(
+            "Température cible (°C)",
+            min_value=float(min_temp),
+            max_value=float(max_temp + 2),
+            value=float(target_temp_state),
+            step=0.1,
+            key="hero_temp_target_input",
+        )
+        update_session("ui_temp_target", float(target_value))
+        target_temp_state = float(st.session_state.get("ui_temp_target", target_value))
+    with ext_col:
+        st.metric("Extérieur", f"{temp_ext:.1f} °C")
+
+    def estimate_standard_heating_time(temp_int: float, temp_target_val: float, temp_ext_val: float):
+        if temp_target_val <= temp_int:
+            return 0.0
+        eta = STANDARD_HOME_MODEL.time_to_reach(
+            temp_int,
+            temp_target_val,
+            temp_ext_val,
+            max_delta_per_hour=STANDARD_HOME_SETTINGS["max_delta_per_hour"],
+        )
+        eta = enforce_realistic_eta(temp_int, temp_target_val, eta)
+        return max(0.0, float(eta)) if eta is not None else None
+
+    def format_duration(hours: float | None) -> str:
+        if hours is None:
+            return "indisponible"
+        minutes = int(round(hours * 60))
+        if minutes <= 10:
+            return "< 10 min"
+        hrs = minutes // 60
+        mins = minutes % 60
+        parts = []
+        if hrs:
+            parts.append(f"{hrs} h")
+        if mins:
+            parts.append(f"{mins} min")
+        return " ".join(parts)
+
+    eta_source_label = data.get("eta_source_label")
+    eta_hours = data.get("eta_hours")
+    if eta_hours is None:
+        eta_hours = estimate_standard_heating_time(current_temp_state, target_temp_state, temp_ext)
+        if eta_source_label is None:
+            eta_source_label = "Scénario logement standard 100 m²"
+    eta_str = format_duration(eta_hours)
+    eta_source_label = eta_source_label or "Projection chauffage"
+    eta_source_safe = html.escape(eta_source_label)
+
+    st.markdown(
+        f"""
+        <div class='hero-condensed'>
+            <h3>Situation thermique</h3>
+            <div class='hero-line'>🏠 {surface_label} · 🧱 {html.escape(isolation_label)} · 🌡️ {temp_ext:.1f}°C dehors</div>
+            <div class='hero-line'>Intérieur {current_temp_state:.1f}°C → Consigne {target_temp_state:.1f}°C · Allumer vers {trigger_label} pour viser {reach_label}</div>
+            <div class='hero-pill'>{eta_source_safe} : <strong>{eta_str}</strong> de chauffe si vous démarrez maintenant</div>
+            <div class='hero-metrics'>
+                <span>Pellets 48h : {pellets_48h:.2f} sac</span>
+                <span>Budget pellets : {cost_pellets:.2f} €</span>
+                <span>Électricité : {cost_elec:.2f} €</span>
+            </div>
+            <div class='hero-meta'>Déclenchement {trigger_label} · Objectif atteint vers {reach_label}</div>
+            <div class='hero-note'>Hypothèse standard : 100 m², {STANDARD_HOME_SETTINGS['power_kw']:.1f} kW @ {STANDARD_HOME_SETTINGS['efficiency']*100:.0f} %, τ = {STANDARD_HOME_SETTINGS['tau_hours']:.1f} h.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def build_isolation_legend_html(selected_code: str | None = None):
@@ -639,14 +953,17 @@ def _build_heating_plan(
     if mode_profile["strategy"] == "pulse":
         daily_hours_budget = mode_profile["default_total_hours"]
     daily_hours_budget = max(1.0, min(24.0, daily_hours_budget))
-    max_sessions = max(1, mode_profile["max_sessions"])
+    min_sessions = max(1, int(mode_profile.get("min_sessions", 1)))
+    max_sessions_cfg = max(min_sessions, int(mode_profile.get("max_sessions", min_sessions)))
+    max_session_hours = max(1, int(mode_profile.get("max_session_hours", 1)))
+    sessions_hint = max(1, int(math.ceil(daily_hours_budget / max_session_hours)))
+    sessions_per_instance = min(max_sessions_cfg, max(min_sessions, sessions_hint))
     instances = max(1, math.ceil(horizon / 24))
-    sessions_per_instance = max_sessions
     target_sessions = sessions_per_instance * instances
     per_session = int(math.floor(daily_hours_budget / sessions_per_instance)) if sessions_per_instance else int(daily_hours_budget)
     if per_session <= 0:
         per_session = 1
-    session_hours = max(1, min(mode_profile["max_session_hours"], per_session))
+    session_hours = max(1, min(max_session_hours, per_session))
     anchor_hours = list(mode_profile.get("anchor_hours") or [])
 
     ext_eff_series = (temp_ext_series - 0.2 * wind_series).reset_index(drop=True)
@@ -666,7 +983,7 @@ def _build_heating_plan(
         required_session_hours = max(1, int(math.ceil(eta_hours)))
         session_hours = max(
             session_hours,
-            min(mode_profile.get("max_session_hours", required_session_hours), required_session_hours),
+            min(max_session_hours, required_session_hours),
         )
 
     def simulate_mask(mask, clamp=False):
@@ -882,8 +1199,18 @@ def sidebar_inputs():
 
     power = st.sidebar.number_input("Puissance poêle (kW)", min_value=1.0, max_value=20.0, value=8.0)
     efficiency = st.sidebar.slider("Rendement", min_value=0.5, max_value=1.0, value=0.85)
-    temp_current = st.sidebar.number_input("Température intérieure actuelle", value=19.0)
-    temp_target = st.sidebar.number_input("Température intérieure cible", value=22.0)
+    if "ui_temp_current" not in st.session_state:
+        st.session_state["ui_temp_current"] = 19.0
+    temp_current = st.sidebar.number_input(
+        "Température intérieure actuelle",
+        value=float(st.session_state["ui_temp_current"]),
+    )
+    if abs(temp_current - st.session_state.get("ui_temp_current", temp_current)) > 1e-3:
+        st.session_state["ui_temp_current"] = float(temp_current)
+    if "ui_temp_target" not in st.session_state:
+        st.session_state["ui_temp_target"] = 22.0
+    temp_target = float(st.session_state["ui_temp_target"])
+    st.sidebar.caption(f"Consigne ajustée via le slider : {temp_target:.1f}°C")
 
     st.sidebar.markdown("### Localisation")
     map_engine = MapEngine()
@@ -921,7 +1248,7 @@ def sidebar_inputs():
         "Mode d'utilisation du poêle",
         mode_names,
         index=0,
-        help="Confort = jusqu'à 3 cycles, Eco = 2 cycles sobres, Vacances = impulsion quotidienne automatique.",
+        help="Confort = 3 à 4 cycles serrés, Eco = 2 cycles sobres, Vacances = impulsion quotidienne automatique.",
     )
     st.sidebar.caption(STOVE_MODES[stove_mode]["description"])
 
@@ -1594,6 +1921,8 @@ def render_diagnostic_tab(cfg, loss, meteo_stats):
     rec = result["recommandation"]
     construction = result["construction"]
 
+    render_circular_performance_chart(score)
+
     if cls == "faible":
         color = "#5CB85C"
     elif cls == "moyenne":
@@ -1650,28 +1979,8 @@ def render_diagnostic_tab(cfg, loss, meteo_stats):
 
     st.subheader("Comparaison régionale")
     comparison_df, region_label = build_diagnostic_comparison(cfg, loss, meteo_stats)
-    family_counts = HOUSING_DISTRIBUTION.groupby("Classe")[["Logements"]].sum().reset_index()
-    family_counts["Pourcentage"] = (
-        family_counts["Logements"] / family_counts["Logements"].sum() * 100
-    )
-    pie_colors = {"faible": "#d35400", "moyenne": "#f1c40f", "forte": "#27ae60"}
-    pie_fig = go.Figure(
-        go.Pie(
-            labels=family_counts["Classe"],
-            values=family_counts["Logements"],
-            hole=0.35,
-            direction="clockwise",
-            marker=dict(colors=[pie_colors.get(lbl, "#95a5a6") for lbl in family_counts["Classe"]]),
-            pull=[0.1 if lbl == cls else 0 for lbl in family_counts["Classe"]],
-            hovertemplate="Famille %{label}<br>Part: %{percent:.1%}<br>Logements: %{value:,}<extra></extra>",
-        )
-    )
-    pie_fig.update_layout(
-        title=f"Répartition des familles de maisons (réf. nationale) — Vous: {cls}",
-        legend_title="Famille",
-        margin=dict(l=10, r=10, t=60, b=10),
-    )
-    st.plotly_chart(pie_fig, use_container_width=True)
+    st.dataframe(comparison_df, hide_index=True, use_container_width=True)
+    st.caption(f"Références régionales calculées autour de {region_label}.")
 
 
 def build_diagnostic_comparison(cfg, loss, meteo_stats):
@@ -1729,94 +2038,658 @@ def build_diagnostic_comparison(cfg, loss, meteo_stats):
 
 
 
-def render_map_tab(cfg, map_engine: MapEngine):
-    st.write("Carte interactive des températures en France.")
-    st.divider()
+CLIMATE_VARIABLES = {
+    "Température": {
+        "label": "Température extérieure",
+        "column": "temp",
+        "unit": "°C",
+        "colorscale": [
+            [0.0, "#0ea5e9"],
+            [1.0, "#dc2626"],
+        ],
+        "value_range": None,
+        "pill_color": "#dc2626",
+        "heat_opacity": 0.55,
+        "pill_opacity": 0.7,
+    },
+    "Humidité": {
+        "label": "Humidité relative",
+        "column": "humidity",
+        "unit": "%",
+        "colorscale": [
+            [0.0, "#ecfccb"],
+            [1.0, "#14532d"],
+        ],
+        "value_range": None,
+        "pill_color": "#15803d",
+        "heat_opacity": 0.45,
+        "pill_opacity": 0.65,
+    },
+    "Vent": {
+        "label": "Vent moyen",
+        "column": "wind",
+        "unit": "km/h",
+        "colorscale": [
+            [0.0, "#e0f2fe"],
+            [1.0, "#312e81"],
+        ],
+        "value_range": None,
+        "pill_color": "#312e81",
+        "heat_opacity": 0.5,
+        "pill_opacity": 0.7,
+    },
+    "Rayonnement": {
+        "label": "Rayonnement solaire",
+        "column": "radiation",
+        "unit": "W/m²",
+        "colorscale": [
+            [0.0, "#fff7ed"],
+            [1.0, "#ea580c"],
+        ],
+        "value_range": None,
+        "pill_color": "#ea580c",
+        "heat_opacity": 0.5,
+        "pill_opacity": 0.7,
+    },
+}
 
-    st.subheader("Carte thermique de la France")
+MAP_SCALE_CONFIG = {
+    "Ville": {"group": "city", "zoom": 6.8, "density_radius": 18},
+    "Commune": {"group": "city", "zoom": 6.2, "density_radius": 22},
+    "Département": {"group": "department", "zoom": 5.0, "density_radius": 35},
+    "Région": {"group": "region", "zoom": 4.3, "density_radius": 45},
+}
+
+MAP_LAYER_CHOICES = ["Heatmap", "Fournisseurs", "Heatmap + Fournisseurs"]
+
+FRANCE_BOUNDARY_GEOJSON = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {"name": "France"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [-5.2, 51.5],
+                    [-5.2, 42.0],
+                    [9.8, 42.0],
+                    [9.8, 51.5],
+                    [-5.2, 51.5],
+                ]],
+            },
+        }
+    ],
+}
+
+
+def load_fournisseurs_data(csv_path: str = "data/fournisseurs.csv") -> pd.DataFrame:
+    try:
+        df = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        df = pd.DataFrame(
+            [
+                {
+                    "nom": "Pellet Vert",
+                    "region": "Auvergne-Rhône-Alpes",
+                    "latitude": 45.76,
+                    "longitude": 4.83,
+                    "logo_url": "",
+                    "site_web": "https://pelletvert.example.com",
+                }
+            ]
+        )
+    df = df.dropna(subset=["latitude", "longitude"])
+    return df
+
+
+def build_climate_snapshot(communes: pd.DataFrame, frames: int = 1) -> tuple[pd.DataFrame, pd.Series | list | None]:
     fm = FranceMeteo()
+    weather = fm.fetch(communes, frames=max(1, frames))
+    data = weather["data"].copy()
+    timeline = weather.get("timeline")
 
-    zoom = st.slider("Zoom carte", min_value=3.0, max_value=8.0, value=4.5, step=0.5)
-    communes_all = map_engine.load_communes()
-    communes = map_engine.filter_by_zoom(communes_all, zoom)
-    communes = communes.rename(columns={"nom": "city"}) if "nom" in communes.columns else communes
+    base_columns = ["city", "lat", "lon", "region", "department", "pop"]
+    metrics = [
+        ("temp", "temp"),
+        ("wind", "wind"),
+        ("humidity", "humidity"),
+        ("radiation", "radiation"),
+        ("wind_dir", "wind_dir"),
+    ]
 
-    weather = fm.fetch(communes, frames=24)
-    df_fr = weather["data"]
-    timeline = list(weather["timeline"].strftime("%d/%m %Hh"))
+    records = []
+    frame_count = max(1, frames)
+    for idx in range(frame_count):
+        frame_df = data[base_columns].copy()
+        for alias, prefix in metrics:
+            source_col = f"{prefix}_{idx}"
+            frame_df[alias] = data[source_col] if source_col in data.columns else np.nan
+        frame_df["frame"] = idx
+        if timeline is not None and idx < len(timeline):
+            frame_df["timestamp"] = timeline[idx]
+        records.append(frame_df)
 
-    layer_options = {
-        "Température": ("temp", "RdBu_r", "°C"),
-        "Humidité": ("humidity", "Blues", "%"),
-        "Vent": ("wind", "PuBu", "km/h"),
-        "Ressentie": ("apparent", "OrRd", "°C"),
-        "Rayonnement": ("radiation", "YlOrBr", "W/m²"),
+    if records:
+        snapshot = pd.concat(records, ignore_index=True)
+    else:
+        snapshot = pd.DataFrame(columns=base_columns + [m[0] for m in metrics] + ["frame", "timestamp"])
+
+    snapshot.dropna(subset=["lat", "lon"], inplace=True)
+    if "pop" in snapshot.columns:
+        snapshot["pop"] = snapshot["pop"].fillna(0)
+    else:
+        snapshot["pop"] = pd.Series(0, index=snapshot.index, dtype=float)
+    return snapshot, timeline
+
+
+def aggregate_climate(df: pd.DataFrame, scale: str) -> pd.DataFrame:
+    config = MAP_SCALE_CONFIG.get(scale, MAP_SCALE_CONFIG["Région"])
+    group_col = config["group"]
+    if scale in ("Ville", "Commune"):
+        view = df.copy()
+        view["label"] = view["city"].astype(str)
+        return view
+    aggregations = {
+        "temp": "mean",
+        "wind": "mean",
+        "humidity": "mean",
+        "radiation": "mean",
+        "lat": "mean",
+        "lon": "mean",
+        "region": "first",
+        "department": "first",
+        "pop": "sum",
     }
-
-    df_fr = smooth_hourly_columns(df_fr, [spec[0] for spec in layer_options.values()])
-
-    selected_layers = st.multiselect(
-        "Couches à afficher (gradients)",
-        list(layer_options.keys()),
-        default=["Température"],
+    include_wind_dir = "wind_dir" in df.columns
+    working_df = df
+    if include_wind_dir:
+        working_df = df.copy()
+        working_df["_wind_dir_rad"] = np.deg2rad(working_df["wind_dir"].astype(float))
+        working_df["_wind_dir_sin"] = np.sin(working_df["_wind_dir_rad"])
+        working_df["_wind_dir_cos"] = np.cos(working_df["_wind_dir_rad"])
+        aggregations["wind_dir"] = "mean"
+        aggregations["_wind_dir_sin"] = "mean"
+        aggregations["_wind_dir_cos"] = "mean"
+    aggregations.pop(group_col, None)
+    agg = (
+        working_df.groupby(group_col, as_index=False)
+        .agg(aggregations)
     )
-    if not selected_layers:
-        selected_layers = ["Température"]
+    if include_wind_dir:
+        agg["wind_dir"] = np.degrees(np.arctan2(agg["_wind_dir_sin"], agg["_wind_dir_cos"])) % 360
+        agg.drop(columns=["_wind_dir_sin", "_wind_dir_cos"], inplace=True, errors="ignore")
+    agg["label"] = agg[group_col].astype(str)
+    return agg
 
-    base_fig = map_engine.base_figure(center_lat=cfg.latitude, center_lon=cfg.longitude, zoom=int(round(zoom)))
 
-    size_hint = [11] * len(df_fr)
+def haversine_distance(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-    layers_meta = {
-        name: {"scale": layer_options[name][1], "unit": layer_options[name][2], "col": layer_options[name][0]}
-        for name in selected_layers
-    }
 
-    def _pick_series(source: pd.DataFrame, base_col: str) -> pd.Series:
-        """Sélectionne la première série disponible pour un calque (col_0, col ou préfixe)."""
-        ordered_candidates = [f"{base_col}_0", base_col]
-        ordered_candidates.extend(sorted(c for c in source.columns if c.startswith(f"{base_col}_")))
-        for candidate in ordered_candidates:
-            if candidate in source.columns:
-                return source[candidate]
-        # Retourne une série NaN pour conserver la taille attendue sans lever d'erreur.
-        return pd.Series([float("nan")] * len(source), index=source.index)
+def resolve_admin_level(lat: float, lon: float, base_df: pd.DataFrame) -> pd.Series | None:
+    if base_df.empty:
+        return None
+    deltas = (base_df["lat"] - lat) ** 2 + (base_df["lon"] - lon) ** 2
+    idx = int(deltas.idxmin())
+    return base_df.iloc[idx]
 
-    for idx, layer in enumerate(selected_layers):
-        col, scale, unit = layer_options[layer]
-        base_fig.add_trace(
-            map_engine.build_layer(
-                df_fr,
-                layer,
-                _pick_series(df_fr, col),
-                scale,
-                unit,
-                sizes=size_hint,
-                show_scale=idx == 0,
+
+def nearest_fournisseurs(lat: float, lon: float, providers: pd.DataFrame, user_position=None, top_n: int = 3) -> pd.DataFrame:
+    if providers.empty:
+        return pd.DataFrame()
+    df = providers.copy()
+    df["distance_click_km"] = df.apply(lambda row: haversine_distance(lat, lon, row["latitude"], row["longitude"]), axis=1)
+    if user_position:
+        df["distance_user_km"] = df.apply(
+            lambda row: haversine_distance(user_position[0], user_position[1], row["latitude"], row["longitude"]), axis=1
+        )
+    else:
+        df["distance_user_km"] = np.nan
+    return df.nsmallest(top_n, "distance_click_km")
+
+
+def render_base_map(scale: str, center: tuple[float, float]) -> go.Figure:
+    zoom = MAP_SCALE_CONFIG.get(scale, MAP_SCALE_CONFIG["Région"]).get("zoom", 4.3)
+    lat, lon = center
+    if any(pd.isna([lat, lon])):
+        lat, lon = 46.2276, 2.2137
+    fig = go.Figure()
+    fig.update_layout(
+        mapbox=dict(
+            style="carto-positron",
+            zoom=zoom,
+            center={"lat": lat, "lon": lon},
+            layers=[
+                {
+                    "sourcetype": "geojson",
+                    "source": FRANCE_BOUNDARY_GEOJSON,
+                    "type": "line",
+                    "color": "#A8FF60",
+                    "line": {"width": 2},
+                }
+            ],
+        ),
+        height=640,
+        width=880,
+        paper_bgcolor="#f8fafc",
+        plot_bgcolor="#f8fafc",
+        margin=dict(l=0, r=0, t=10, b=10),
+        font=dict(color="#0f172a"),
+        legend=dict(bgcolor="rgba(255,255,255,0.9)", font=dict(color="#0f172a")),
+    )
+    return fig
+
+
+def render_heatmap_layer(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    variable: str,
+    scale: str,
+    *,
+    name: str | None = None,
+    visible: bool = True,
+    show_colorbar: bool = True,
+):
+    if df.empty:
+        return fig
+
+    config = CLIMATE_VARIABLES[variable]
+    column = config["column"]
+    if column not in df.columns:
+        return fig
+    values = df[column]
+    if values.empty:
+        return fig
+
+    radius = MAP_SCALE_CONFIG.get(scale, MAP_SCALE_CONFIG["Région"]).get("density_radius", 25)
+    values_clean = values.dropna()
+    value_range = config.get("value_range")
+    zmin, zmax = (None, None)
+    if isinstance(value_range, tuple):
+        zmin, zmax = value_range
+    elif not values_clean.empty:
+        lower = float(values_clean.quantile(0.05)) if len(values_clean) > 1 else float(values_clean.min())
+        upper = float(values_clean.quantile(0.95)) if len(values_clean) > 1 else float(values_clean.max())
+        if math.isclose(lower, upper):
+            lower = float(values_clean.min())
+            upper = float(values_clean.max())
+        zmin, zmax = lower, upper
+    intensity_kwargs: dict[str, float] = {}
+    if zmin is not None:
+        intensity_kwargs["zmin"] = zmin
+    if zmax is not None:
+        intensity_kwargs["zmax"] = zmax
+
+    label = config.get("label", variable)
+
+    heat_opacity = float(config.get("heat_opacity", 0.6))
+
+    fig.add_trace(
+        go.Densitymapbox(
+            lat=df["lat"],
+            lon=df["lon"],
+            z=values,
+            radius=radius,
+            colorscale=config["colorscale"],
+            opacity=heat_opacity,
+            colorbar=(
+                dict(
+                    title=dict(text=f"{label} ({config['unit']})", font=dict(color="#0f172a")),
+                    tickcolor="#0f172a",
+                )
+                if show_colorbar
+                else None
+            ),
+            showscale=show_colorbar,
+            hovertemplate="<b>%{text}</b><br>" + f"{label}: %{{z:.1f}} {config['unit']}<extra></extra>",
+            text=df.get("label", df.get("city", "")),
+            name=name or f"{label} — {scale}",
+            visible=visible,
+            **intensity_kwargs,
+        )
+    )
+    return fig
+
+
+def render_metric_pills(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    variable: str,
+    *,
+    visible: bool = True,
+    granularity: str = "Région",
+):
+    if df.empty:
+        return fig
+    config = CLIMATE_VARIABLES[variable]
+    column = config["column"]
+    if column not in df.columns:
+        return fig
+    df = df.dropna(subset=[column]).copy()
+    if df.empty:
+        return fig
+    label = config.get("label", variable)
+    text = [f"{row['label']}<br>{row[column]:.1f} {config['unit']}" for _, row in df.iterrows()]
+    color = config.get("pill_color", "#2563eb")
+    pill_opacity = float(config.get("pill_opacity", 0.75))
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=df["lat"],
+            lon=df["lon"],
+            mode="markers+text",
+            text=text,
+            textposition="top center",
+            marker=dict(size=16, color=color, opacity=pill_opacity, symbol="circle"),
+            name=f"{label} — {granularity}",
+            hovertemplate="%{text}<extra></extra>",
+            visible=visible,
+        )
+    )
+    return fig
+
+def render_fournisseur_layer(fig: go.Figure, providers: pd.DataFrame, *, visible: bool = False):
+    if providers.empty:
+        return fig
+
+    site_series = providers["site_web"] if "site_web" in providers.columns else pd.Series([""] * len(providers))
+    custom = np.stack(
+        [
+            providers["nom"].astype(str).to_numpy(),
+            providers["region"].astype(str).to_numpy(),
+            site_series.astype(str).to_numpy(),
+        ],
+        axis=-1,
+    )
+
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=providers["latitude"],
+            lon=providers["longitude"],
+            mode="markers",
+            marker=dict(size=18, color="#f97316", opacity=0.9, symbol="triangle"),
+            customdata=custom,
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "Région : %{customdata[1]}<br>"
+                "<a href='%{customdata[2]}' target='_blank'>Site web</a><extra></extra>"
+            ),
+            name="Fournisseurs (calque)",
+            visible=visible,
+        )
+    )
+    return fig
+
+
+def _bearing_to_arrow(degrees: float | None) -> str:
+    if degrees is None or pd.isna(degrees):
+        return "·"
+    normalized = float(degrees) % 360
+    sectors = [
+        (22.5, "↑"),
+        (67.5, "↗"),
+        (112.5, "→"),
+        (157.5, "↘"),
+        (202.5, "↓"),
+        (247.5, "↙"),
+        (292.5, "←"),
+        (337.5, "↖"),
+    ]
+    for limit, symbol in sectors:
+        if normalized < limit:
+            return symbol
+    return "↑"
+
+
+def render_wind_vector_layer(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    *,
+    visible: bool = False,
+    granularity: str = "Région",
+    max_points: int = 150,
+):
+    if not visible or df is None or df.empty:
+        return fig
+    required = {"lat", "lon", "wind", "wind_dir"}
+    if not required.issubset(df.columns):
+        return fig
+    subset = df.dropna(subset=list(required)).copy()
+    if subset.empty:
+        return fig
+    subset = subset.sort_values("wind", ascending=False).head(max_points)
+    arrows = [_bearing_to_arrow(val) for val in subset["wind_dir"]]
+    texts = [f"{arrow} {speed:.0f} km/h" for arrow, speed in zip(arrows, subset["wind"], strict=False)]
+    custom = np.stack(
+        [
+            subset["wind"].astype(float).to_numpy(),
+            subset["wind_dir"].astype(float).to_numpy(),
+        ],
+        axis=-1,
+    )
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=subset["lat"],
+            lon=subset["lon"],
+            mode="markers+text",
+            text=texts,
+            textposition="top center",
+            marker=dict(
+                size=np.clip(subset["wind"].astype(float), 8, 28),
+                color="#0ea5e9",
+                opacity=0.85,
+                symbol="circle",
+            ),
+            name=f"Vecteur vent — {granularity}",
+            customdata=custom,
+            hovertemplate="Vent moyen: %{customdata[0]:.1f} km/h<br>Direction: %{customdata[1]:.0f}°<extra></extra>",
+            visible=visible,
+        )
+    )
+    return fig
+
+
+
+
+def render_france_map(
+    df_climat: pd.DataFrame,
+    df_fournisseurs: pd.DataFrame,
+    timeline,
+    user_position=None,
+):
+    st.subheader("Radar météo national")
+    if df_climat.empty:
+        st.info("Impossible de charger les données climatiques pour la carte.")
+        return
+
+    st.markdown(
+        """
+        <style>
+            .map-card {background:#ffffff;border:1px solid #e2e8f0;border-radius:18px;padding:18px 22px;margin-bottom:26px;box-shadow:0 16px 40px rgba(15,23,42,0.08);} 
+            .map-card .header {display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;}
+            .map-card .header span {font-size:0.95rem;color:#475569;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    frames = sorted(df_climat["frame"].unique())
+    min_frame, max_frame = int(min(frames)), int(max(frames))
+
+    with st.container():
+        st.markdown("<div class='map-card'>", unsafe_allow_html=True)
+        control_cols = st.columns([2, 1])
+        with control_cols[0]:
+            frame_idx = st.slider(
+                "Frise horaire (heures)",
+                min_value=min_frame,
+                max_value=max_frame,
+                value=st.session_state.get("map_frame_idx", min_frame),
+                step=1,
+                key="map_frame_slider",
+                format="T+%d h",
+            )
+            st.session_state["map_frame_idx"] = frame_idx
+            if st.button("▶️ Lancer l'animation", key="map_play_button"):
+                placeholder = st.empty()
+                for next_idx in list(range(frame_idx, max_frame + 1)) + list(range(min_frame, frame_idx)):
+                    st.session_state["map_frame_idx"] = next_idx
+                    frame_idx = next_idx
+                    placeholder.write(f"Animation T+{next_idx} h")
+                    time.sleep(0.25)
+        with control_cols[1]:
+            granularity = st.radio(
+                "Pastilles",
+                ["Région", "Département"],
+                index=0,
+                horizontal=False,
+                key="map_granularity",
+            )
+
+        layer_labels = [CLIMATE_VARIABLES[key].get("label", key) for key in CLIMATE_VARIABLES]
+        label_to_key = {CLIMATE_VARIABLES[key].get("label", key): key for key in CLIMATE_VARIABLES}
+        default_label = CLIMATE_VARIABLES["Température"].get("label", "Température")
+        with st.expander("Calques météo"):
+            layer_cols = st.columns([2, 2, 1])
+            with layer_cols[0]:
+                heat_selection = st.multiselect(
+                    "Heatmaps",
+                    options=layer_labels,
+                    default=[default_label],
+                    key="map_heat_layers",
+                )
+            with layer_cols[1]:
+                marker_selection = st.multiselect(
+                    "Pastilles régionales",
+                    options=layer_labels,
+                    default=[default_label],
+                    key="map_marker_layers",
+                )
+            with layer_cols[2]:
+                show_providers = st.checkbox("Fournisseurs", value=False, key="map_show_providers")
+                show_wind_vectors = st.checkbox("Vecteurs vent", value=False, key="map_show_wind_vectors")
+
+        heat_layers = [label_to_key[label] for label in heat_selection if label in label_to_key]
+        marker_layers = [label_to_key[label] for label in marker_selection if label in label_to_key]
+        if not heat_layers:
+            heat_layers = ["Température"]
+        if not marker_layers:
+            marker_layers = ["Température"]
+        provider_layer = show_providers
+        wind_vector_layer = show_wind_vectors
+
+        df_frame = df_climat[df_climat["frame"] == frame_idx]
+        if df_frame.empty:
+            st.warning("Aucune donnée pour cette échéance.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+
+        ts_label = f"T+{frame_idx} h"
+        if timeline is not None and frame_idx < len(timeline):
+            try:
+                ts = pd.to_datetime(timeline[frame_idx])
+                ts_label = ts.strftime("%a %d %b · %Hh").capitalize()
+            except Exception:
+                pass
+
+    aggregated = aggregate_climate(df_frame, granularity)
+    if not aggregated.empty:
+        aggregated = aggregated.sort_values("pop", ascending=False).head(70)
+
+    density_source = df_frame.sort_values("pop", ascending=False).head(800)
+    if user_position:
+        center = user_position
+    elif not aggregated.empty:
+        center = (float(aggregated["lat"].mean()), float(aggregated["lon"].mean()))
+    else:
+        center = (46.2276, 2.2137)
+
+    fig = render_base_map(granularity, center)
+    for idx, variable in enumerate(heat_layers):
+        render_heatmap_layer(
+            fig,
+            density_source,
+            variable,
+            granularity,
+            visible=True,
+            show_colorbar=(idx == 0),
+        )
+
+    for variable in CLIMATE_VARIABLES.keys():
+        render_metric_pills(
+            fig,
+            aggregated,
+            variable,
+            visible=variable in marker_layers,
+            granularity=granularity,
+        )
+    render_fournisseur_layer(fig, df_fournisseurs, visible=provider_layer)
+    render_wind_vector_layer(
+        fig,
+        aggregated,
+        visible=wind_vector_layer,
+        granularity=granularity,
+    )
+
+    if user_position:
+        fig.add_trace(
+            go.Scattermapbox(
+                lat=[user_position[0]],
+                lon=[user_position[1]],
+                mode="markers",
+                marker=dict(size=18, color="#16a34a", opacity=0.95, symbol="star"),
+                name="Ma position",
             )
         )
 
-    frames = map_engine.calc_timelapse_frames(
-        df_fr,
-        timeline,
-        layers_meta,
-        aggregates=None,
+    fig.update_layout(
+        legend=dict(
+            title="Calques",
+            x=0.99,
+            xanchor="right",
+            y=0.99,
+            bgcolor="rgba(248,250,252,0.85)",
+            bordercolor="#e2e8f0",
+            borderwidth=1,
+        ),
     )
-    base_fig.frames = frames
-    map_engine.add_timelapse_controls(base_fig)
-    map_engine.pick_on_map(base_fig, cfg.latitude, cfg.longitude)
-    base_fig.add_annotation(
-        x=1.03,
-        y=0.5,
+    fig.add_annotation(
+        text=f"Projection : {ts_label}",
+        x=0.01,
+        y=0.01,
         xref="paper",
         yref="paper",
-        text="Sources: Open-Meteo · INSEE",
+        bgcolor="rgba(255,255,255,0.85)",
+        bordercolor="#cbd5f5",
+        borderwidth=1,
+        font=dict(color="#0f172a"),
         showarrow=False,
         align="left",
     )
 
-    st.caption("Pastilles redimensionnées selon l'échelle de carte et colorées par couches météorologiques sélectionnées.")
-    st.plotly_chart(base_fig, use_container_width=True)
+    st.markdown(
+        f"""
+        <div class='header'>
+            <strong>Exploration multi-couches</strong>
+            <span>{ts_label} · {granularity}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def render_map_tab(cfg, map_engine: MapEngine):
+    communes = map_engine.load_communes()
+    df_climat, timeline = build_climate_snapshot(communes, frames=24)
+    df_fournisseurs = load_fournisseurs_data()
+    user_position = (cfg.latitude, cfg.longitude) if cfg.latitude and cfg.longitude else None
+    render_france_map(df_climat, df_fournisseurs, timeline, user_position=user_position)
 
 
 
@@ -1888,21 +2761,63 @@ def main():
         pellet_df,
     )
 
-    st.markdown(
-        build_topline_summary(
-            cfg,
-            df,
-            heating_plan,
-            model,
-            stove_mode,
-            target_temp_effective,
-            cost,
-            pellet_cost,
-            electric_cost,
-            pellet_usage,
-        ),
-        unsafe_allow_html=True,
+    trigger_ts, reach_ts = derive_schedule_markers(heating_plan, cfg, model, target_temp_effective)
+    area_m2 = cfg.volume_m3 / 2.5 if cfg.volume_m3 else 0.0
+    temp_ext_value = (
+        float(df["temp_ext"].iloc[0])
+        if not df.empty and "temp_ext" in df
+        else float(cfg.temp_current)
     )
+    ui_temp_target = float(st.session_state.get("ui_temp_target", target_temp_effective))
+    ui_temp_current = float(st.session_state.get("ui_temp_current", cfg.temp_current))
+    ramp_cap = heating_plan.get("max_ramp_c_per_hour") or STOVE_MODES.get(stove_mode, {}).get("max_delta_per_hour", STANDARD_HOME_SETTINGS["max_delta_per_hour"])
+    wind_series = heating_plan.get("wind_series") if isinstance(heating_plan, dict) else None
+    wind_reference = None
+    if isinstance(wind_series, pd.Series) and not wind_series.empty:
+        wind_reference = float(wind_series.iloc[0])
+    elif not df.empty and "wind" in df:
+        wind_reference = float(df["wind"].iloc[0])
+    else:
+        wind_reference = 0.0
+    eta_hours_live = None
+    try:
+        effective_ext = temp_ext_value - 0.2 * float(wind_reference)
+        eta_raw = model.time_to_reach(
+            ui_temp_current,
+            ui_temp_target,
+            effective_ext,
+            max_delta_per_hour=ramp_cap,
+        )
+        eta_hours_live = enforce_realistic_eta(ui_temp_current, ui_temp_target, eta_raw)
+    except Exception:
+        eta_hours_live = None
+    eta_source_label = "Modèle thermique personnalisé" if eta_hours_live is not None else "Scénario logement standard 100 m²"
+
+    now_reference = pd.Timestamp.now(tz="Europe/Paris")
+    trigger_label = now_reference.isoformat()
+    reach_label = "--"
+    if eta_hours_live is not None:
+        reach_label = (now_reference + pd.Timedelta(hours=float(eta_hours_live))).isoformat()
+    elif reach_ts is not None:
+        reach_label = reach_ts.isoformat()
+
+    dashboard_payload = {
+        "temp_ext": temp_ext_value,
+        "temp_target": ui_temp_target,
+        "temp_current": ui_temp_current,
+        "surface_label": f"{area_m2:.0f} m²",
+        "isolation_label": cfg.isolation,
+        "heure_declenchement": trigger_label,
+        "heure_objectif": reach_label,
+        "pellets_48h": pellet_usage.get("total_bags", 0.0),
+        "cost_pellets": pellet_cost,
+        "cost_elec": electric_cost,
+        "cost_total": cost,
+        "temp_bounds": (16.0, 25.0),
+        "eta_hours": eta_hours_live,
+        "eta_source_label": eta_source_label,
+    }
+    render_green_dashboard(dashboard_payload)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Thermique", "Météo", "KPIs", "Diagnostic", "Carte France"])
 
